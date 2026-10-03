@@ -16,11 +16,15 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
+import ssl
+import urllib.request
+import urllib.error
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 try:
     from PyQt5.QtCore import (
@@ -475,22 +479,126 @@ class ChmSearchTab(QWidget):
 
 
 class ChmWebPage(QWebEnginePage):
+    def _main_window(self):
+        view = self.view()
+        return view.window() if view is not None else None
+
     def acceptNavigationRequest(self, url: QUrl, navigation_type, is_main_frame: bool) -> bool:
         scheme = url.scheme().lower()
+
         if is_main_frame and scheme in ("mk", "ms-its", "its"):
-            view = self.view()
-            window = view.window() if view is not None else None
+            window = self._main_window()
             if window is not None and hasattr(window, "load_local"):
                 window.load_local(url.toString())
             return False
+
         if (
             is_main_frame
             and navigation_type == QWebEnginePage.NavigationTypeLinkClicked
-            and scheme in ("http", "https", "mailto")
+            and scheme == "mailto"
         ):
             QDesktopServices.openUrl(url)
             return False
+
         return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
+
+    def certificateError(self, error) -> bool:
+        url = error.url()
+        host = url.host().casefold()
+        window = self._main_window()
+
+        if window is not None and hasattr(window, "is_certificate_host_trusted"):
+            if window.is_certificate_host_trusted(host):
+                print(
+                    "[CHM NETWORK] Zertifikatsfehler für bereits freigegebenen Host "
+                    f"{host}: {error.errorDescription()}",
+                    flush=True,
+                )
+                return True
+
+        overridable = True
+        try:
+            overridable = bool(error.isOverridable())
+        except Exception:
+            pass
+
+        if not overridable:
+            print(
+                "[CHM NETWORK] Nicht übersteuerbarer Zertifikatsfehler: "
+                f"{url.toString()} :: {error.errorDescription()}",
+                flush=True,
+            )
+            return False
+
+        parent = window if isinstance(window, QWidget) else None
+        answer = QMessageBox.warning(
+            parent,
+            "HTTPS-Zertifikat",
+            "Beim Laden einer Remote-Ressource ist ein Zertifikatsfehler "
+            "aufgetreten.\n\n"
+            f"Host: {host}\n"
+            f"URL: {url.toString()}\n\n"
+            f"{error.errorDescription()}\n\n"
+            "Möchtest du diesem Host trotzdem vertrauen?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if answer == QMessageBox.Yes:
+            if window is not None and hasattr(window, "trust_certificate_host"):
+                window.trust_certificate_host(host)
+            print(f"[CHM NETWORK] Zertifikat für Host freigegeben: {host}", flush=True)
+            return True
+
+        return False
+
+    def javaScriptConsoleMessage(self, level, message, line_number, source_id) -> None:
+        print(
+            f"[CHM WEB {level}] {source_id}:{line_number}: {message}",
+            flush=True,
+        )
+        try:
+            super().javaScriptConsoleMessage(level, message, line_number, source_id)
+        except Exception:
+            pass
+
+
+class ChmWebView(QWebEngineView):
+    """WebView mit einem funktionierenden 'Show Source'-Kontextmenü."""
+
+    show_source_requested = pyqtSignal()
+
+    def contextMenuEvent(self, event) -> None:
+        menu = self.page().createStandardContextMenu()
+
+        # QtWebEngine besitzt selbst eine View-Source-Aktion, deren Verhalten
+        # je nach Qt5-Build/Deployment wenig hilfreich sein kann. Wir entfernen
+        # sie aus dem Standardmenü und ersetzen sie durch unsere eigene Aktion,
+        # die den Quelltext im Standard-Texteditor des Betriebssystems öffnet.
+        try:
+            if hasattr(QWebEnginePage, "ViewSource"):
+                native_source = self.page().action(QWebEnginePage.ViewSource)
+                if native_source is not None:
+                    menu.removeAction(native_source)
+        except Exception:
+            pass
+
+        # Falls die native Aktion nicht als identisches QAction-Objekt geliefert
+        # wurde, entfernen wir lokalisierte Varianten über den sichtbaren Text.
+        for action in list(menu.actions()):
+            title = action.text().replace("&", "").strip().casefold()
+            if (
+                "view source" in title
+                or "show source" in title
+                or "seitenquelltext" in title
+                or "quelltext anzeigen" in title
+            ):
+                menu.removeAction(action)
+
+        menu.addSeparator()
+        source_action = menu.addAction("Show Source")
+        source_action.triggered.connect(self.show_source_requested.emit)
+        menu.exec_(event.globalPos())
 
 
 class ChmSourceDialog(QDialog):
@@ -507,6 +615,9 @@ class ChmSourceDialog(QDialog):
 
 class MainWindow(QMainWindow):
     CONTENT_THEME_STYLE_ID = "d64-chm-content-theme"
+
+    remote_asset_ready = pyqtSignal(str, str)
+    remote_asset_failed = pyqtSignal(str, str)
 
     def __init__(self, parent=None, dark_mode: Optional[bool] = None):
         super().__init__(parent)
@@ -538,6 +649,9 @@ class MainWindow(QMainWindow):
         self.chm_path: Optional[Path] = None
         self.home_local = ""
         self.source_dialogs: List[ChmSourceDialog] = []
+        self.source_temp_files: List[Path] = []
+        self.remote_asset_cache = QTemporaryDir("chmviewer_remote_assets_XXXXXX")
+        self.remote_asset_inflight = set()
         self.context_id_map: Dict[int, str] = {}
         self.pending_context_language = ""
         self.pending_context_word = ""
@@ -624,15 +738,34 @@ class MainWindow(QMainWindow):
         favorites_row.addStretch(1)
         self.favorites_tab.layout().addLayout(favorites_row)
 
-        self.web_view = QWebEngineView(self)
+        self.web_view = ChmWebView(self)
         self.web_view.setObjectName("chm_content_view")
         self.web_page = ChmWebPage(self.web_view)
         self.web_view.setPage(self.web_page)
         self.web_page.setBackgroundColor(self.content_background_color())
 
         web_settings = self.web_page.settings()
-        web_settings.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, True)
-        web_settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
+        web_settings.setAttribute(
+            QWebEngineSettings.LocalContentCanAccessFileUrls,
+            True,
+        )
+        # Gewollt: lokale, aus CHM entpackte HTML-Seiten dürfen HTTP/HTTPS-
+        # Ressourcen laden. Damit funktionieren z.B.
+        # <img src="http://server/api/ic.php?..."> sowie Ajax/fetch-Aufrufe
+        # (bei fetch/XHR muss der Server zusätzlich passende CORS-Header senden).
+        web_settings.setAttribute(
+            QWebEngineSettings.LocalContentCanAccessRemoteUrls,
+            True,
+        )
+        web_settings.setAttribute(QWebEngineSettings.AutoLoadImages, True)
+        web_settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
+        try:
+            web_settings.setAttribute(
+                QWebEngineSettings.AllowRunningInsecureContent,
+                True,
+            )
+        except (AttributeError, TypeError):
+            pass
 
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.splitter.setChildrenCollapsible(False)
@@ -665,6 +798,7 @@ class MainWindow(QMainWindow):
         self.quit_action.triggered.connect(self.close)
         self.copy_action.triggered.connect(lambda: self.web_page.triggerAction(QWebEnginePage.Copy))
         self.source_action.triggered.connect(self.show_page_source)
+        self.web_view.show_source_requested.connect(self.show_page_source)
         self.about_action.triggered.connect(self.show_about)
         self.dark_action.toggled.connect(self.set_dark_mode)
         self.home_action.triggered.connect(self.go_home)
@@ -687,6 +821,8 @@ class MainWindow(QMainWindow):
         self.web_view.loadProgress.connect(lambda value: self.status_bar.showMessage(f"Lade Seite … {value} %"))
         self.web_view.loadFinished.connect(self.load_finished)
         self.web_view.urlChanged.connect(lambda _url: self.update_navigation())
+        self.remote_asset_ready.connect(self._apply_resolved_remote_asset)
+        self.remote_asset_failed.connect(self._report_remote_asset_failure)
         self.web_view.titleChanged.connect(self.title_changed)
 
     # ---- Theme ------------------------------------------------------------
@@ -807,6 +943,75 @@ QToolTip {
     color: #ffffff;
     border: 1px solid #666b73;
 }
+
+/* Einheitliche Dark-Mode-Scrollbars für Themenbaum und alle Qt-Widgets. */
+QScrollBar:vertical {
+    background: #163b73;
+    width: 16px;
+    margin: 16px 0 16px 0;
+    border: 1px solid #4b79ad;
+}
+QScrollBar::handle:vertical {
+    background: #245a9a;
+    min-height: 24px;
+    border: 1px solid #4b79ad;
+    border-radius: 3px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #3375bd;
+}
+QScrollBar::sub-line:vertical,
+QScrollBar::add-line:vertical {
+    background: #1d4d87;
+    height: 16px;
+    border: 1px solid #4b79ad;
+}
+QScrollBar::sub-line:vertical {
+    subcontrol-position: top;
+    subcontrol-origin: margin;
+}
+QScrollBar::add-line:vertical {
+    subcontrol-position: bottom;
+    subcontrol-origin: margin;
+}
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: #163b73;
+}
+
+QScrollBar:horizontal {
+    background: #163b73;
+    height: 16px;
+    margin: 0 16px 0 16px;
+    border: 1px solid #4b79ad;
+}
+QScrollBar::handle:horizontal {
+    background: #245a9a;
+    min-width: 24px;
+    border: 1px solid #4b79ad;
+    border-radius: 3px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #3375bd;
+}
+QScrollBar::sub-line:horizontal,
+QScrollBar::add-line:horizontal {
+    background: #1d4d87;
+    width: 16px;
+    border: 1px solid #4b79ad;
+}
+QScrollBar::sub-line:horizontal {
+    subcontrol-position: left;
+    subcontrol-origin: margin;
+}
+QScrollBar::add-line:horizontal {
+    subcontrol-position: right;
+    subcontrol-origin: margin;
+}
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: #163b73;
+}
 """
 
     def apply_application_theme(self) -> None:
@@ -838,15 +1043,51 @@ QToolTip {
             background, foreground = "#000000", "#ffffff"
             link, visited, active = "#66b3ff", "#c792ea", "#ffcc66"
             scheme = "dark"
+
+            # Exakt dieselben Maße/Farben wie die native Qt-Scrollbar links.
+            scrollbar_css = """
+::-webkit-scrollbar {
+    width: 16px;
+    height: 16px;
+    background: #163b73;
+}
+::-webkit-scrollbar-track {
+    background: #163b73;
+    border: 1px solid #4b79ad;
+}
+::-webkit-scrollbar-thumb {
+    background: #245a9a;
+    border: 1px solid #4b79ad;
+    border-radius: 3px;
+    min-height: 24px;
+    min-width: 24px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #3375bd;
+}
+::-webkit-scrollbar-button:single-button {
+    width: 16px;
+    height: 16px;
+    display: block;
+    background-color: #1d4d87;
+    border: 1px solid #4b79ad;
+}
+::-webkit-scrollbar-corner {
+    background: #163b73;
+}
+"""
         else:
             background, foreground = "#ffffff", "#000000"
             link, visited, active = "#0000ee", "#551a8b", "#ee0000"
             scheme = "light"
+            scrollbar_css = ""
+
         return (
             f":root {{ color-scheme: {scheme}; }}\n"
             f"html, body {{ background:{background} !important; color:{foreground} !important; }}\n"
             f"a:link {{ color:{link}; }} a:visited {{ color:{visited}; }} a:active {{ color:{active}; }}\n"
             "img, svg { max-width: 100%; }\n"
+            + scrollbar_css
         )
 
     def apply_widget_theme(self) -> None:
@@ -924,6 +1165,165 @@ QToolTip {
         self.settings.setValue("ui/main_splitter_state", self.splitter.saveState())
         self.settings.setValue("ui/dark_mode", self.dark_mode_enabled)
         self.settings.sync()
+
+
+    # ---- Remote-URL-/SVG-Unterstützung -----------------------------------
+    def certificate_trusted_hosts(self) -> List[str]:
+        raw = self.settings.value("network/trusted_certificate_hosts", [])
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            raw = [raw]
+        return sorted({
+            str(value).strip().casefold()
+            for value in raw
+            if str(value).strip()
+        })
+
+    def is_certificate_host_trusted(self, host: str) -> bool:
+        return str(host or "").casefold() in self.certificate_trusted_hosts()
+
+    def trust_certificate_host(self, host: str) -> None:
+        host = str(host or "").strip().casefold()
+        if not host:
+            return
+        values = set(self.certificate_trusted_hosts())
+        values.add(host)
+        self.settings.setValue("network/trusted_certificate_hosts", sorted(values))
+        self.settings.sync()
+
+    def resolve_failed_remote_images(self) -> None:
+        script = (
+            "(function(){"
+            "const result=[];"
+            "document.querySelectorAll('img').forEach(function(img){"
+            "const src=img.getAttribute('src')||'';"
+            "if(!/^https?:\\/\\//i.test(src))return;"
+            "if(img.dataset.chmRemoteBridged==='1')return;"
+            "if(!img.complete||img.naturalWidth===0||img.naturalHeight===0){result.push(src);}"
+            "});"
+            "return Array.from(new Set(result));"
+            "})();"
+        )
+        self.web_page.runJavaScript(script, self._remote_image_urls_found)
+
+    def _remote_image_urls_found(self, urls) -> None:
+        if not isinstance(urls, list):
+            return
+        for value in urls:
+            url = str(value or "").strip()
+            if not url or url in self.remote_asset_inflight:
+                continue
+            if not url.lower().startswith(("http://", "https://")):
+                continue
+            self.remote_asset_inflight.add(url)
+            print(f"[CHM NETWORK] Remote-IMG Fallback: {url}", flush=True)
+            threading.Thread(
+                target=self._download_remote_asset_worker,
+                args=(url,),
+                daemon=True,
+            ).start()
+
+    def _download_remote_asset_worker(self, url: str) -> None:
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 CHMViewer/1.0"
+                    ),
+                    "Accept": "image/svg+xml,image/*;q=0.9,*/*;q=0.5",
+                },
+                method="GET",
+            )
+
+            parsed = urlparse(url)
+            context = None
+            if (
+                parsed.scheme.casefold() == "https"
+                and self.is_certificate_host_trusted(parsed.hostname or "")
+            ):
+                context = ssl._create_unverified_context()
+
+            with urllib.request.urlopen(request, timeout=15, context=context) as response:
+                data = response.read(16 * 1024 * 1024 + 1)
+                content_type = (
+                    response.headers.get("Content-Type", "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .casefold()
+                )
+
+            if len(data) > 16 * 1024 * 1024:
+                raise ValueError("Remote-Grafik ist größer als 16 MiB.")
+
+            probe = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+
+            if content_type == "image/svg+xml" or b"<svg" in probe:
+                suffix = ".svg"
+            elif content_type == "image/png" or data.startswith(b"\x89PNG"):
+                suffix = ".png"
+            elif content_type in ("image/jpeg", "image/jpg") or data.startswith(b"\xff\xd8"):
+                suffix = ".jpg"
+            elif content_type == "image/gif" or data.startswith((b"GIF87a", b"GIF89a")):
+                suffix = ".gif"
+            elif content_type == "image/webp" or (
+                len(data) > 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+            ):
+                suffix = ".webp"
+            else:
+                raise ValueError(
+                    "Serverantwort ist kein erkennbares Bild. "
+                    f"Content-Type: {content_type or '(fehlt)'}"
+                )
+
+            cache_dir = Path(self.remote_asset_cache.path())
+            digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+            target = cache_dir / f"{digest}{suffix}"
+            target.write_bytes(data)
+
+            local_url = QUrl.fromLocalFile(str(target)).toString()
+            print(
+                f"[CHM NETWORK] Remote-Bild lokal gespiegelt: {url} -> {target}",
+                flush=True,
+            )
+            self.remote_asset_ready.emit(url, local_url)
+        except Exception as exc:
+            self.remote_asset_failed.emit(url, str(exc))
+
+    def _apply_resolved_remote_asset(self, original_url: str, local_url: str) -> None:
+        self.remote_asset_inflight.discard(original_url)
+        script = (
+            "(function(){"
+            f"const original={json.dumps(original_url)};"
+            f"const local={json.dumps(local_url)};"
+            "document.querySelectorAll('img').forEach(function(img){"
+            "const src=img.getAttribute('src')||'';"
+            "if(src===original||img.src===original){"
+            "img.dataset.chmRemoteBridged='1';"
+            "img.dataset.chmRemoteOriginal=original;"
+            "img.src=local;"
+            "}"
+            "});"
+            "})();"
+        )
+        self.web_page.runJavaScript(script)
+        self.status_bar.showMessage(
+            "Remote-Grafik über lokalen SVG/Bild-Bridge geladen",
+            5000,
+        )
+
+    def _report_remote_asset_failure(self, url: str, reason: str) -> None:
+        self.remote_asset_inflight.discard(url)
+        print(
+            f"[CHM NETWORK] Remote-Grafik fehlgeschlagen: {url} :: {reason}",
+            flush=True,
+        )
+        self.status_bar.showMessage(
+            f"Remote-Grafik konnte nicht geladen werden: {reason}",
+            8000,
+        )
 
     # ---- Open / metadata --------------------------------------------------
     def choose_chm(self) -> None:
@@ -1466,26 +1866,62 @@ QToolTip {
 
     # ---- Commands / lifecycle -------------------------------------------
     def show_page_source(self) -> None:
-        dialog = ChmSourceDialog(self)
-        dialog.editor.setPlainText("Quelltext wird geladen …")
-        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
-        self.source_dialogs.append(dialog)
+        """Öffnet den Seitenquelltext im Standard-Texteditor des Systems.
 
-        def remove_dialog(*_args) -> None:
-            if dialog in self.source_dialogs:
-                self.source_dialogs.remove(dialog)
+        Wir verwenden QWebEnginePage.toHtml(), damit sowohl lokale CHM-Seiten
+        als auch remote geladene Seiten funktionieren. Der Quelltext wird als
+        UTF-8-Textdatei geschrieben; dadurch öffnet Windows nicht versehentlich
+        den Standardbrowser für eine .html-Datei.
+        """
+        self.status_bar.showMessage("Seitenquelltext wird gelesen …")
 
         def receive_source(source: str) -> None:
             try:
-                dialog.editor.setPlainText(source)
-                cursor = dialog.editor.textCursor()
-                cursor.movePosition(QTextCursor.Start)
-                dialog.editor.setTextCursor(cursor)
-            except RuntimeError:
-                pass
+                title = self.web_view.title().strip()
+                if not title:
+                    title = "page"
 
-        dialog.destroyed.connect(remove_dialog)
-        dialog.show()
+                safe_title = re.sub(
+                    r"[^A-Za-z0-9_.-]+",
+                    "_",
+                    title,
+                ).strip("._") or "page"
+
+                source_dir = Path(tempfile.gettempdir()) / "chmviewer_source"
+                source_dir.mkdir(parents=True, exist_ok=True)
+
+                source_file = source_dir / (
+                    f"{safe_title}_{int(time.time() * 1000)}.html.txt"
+                )
+                source_file.write_text(
+                    source,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                self.source_temp_files.append(source_file)
+
+                opened = QDesktopServices.openUrl(
+                    QUrl.fromLocalFile(str(source_file))
+                )
+                if opened:
+                    self.status_bar.showMessage(
+                        f"Quelltext im Standard-Editor geöffnet: {source_file.name}",
+                        5000,
+                    )
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Show Source",
+                        "Der Standard-Editor konnte nicht geöffnet werden.\\n\\n"
+                        f"Quelltextdatei:\\n{source_file}",
+                    )
+            except Exception as exc:
+                QMessageBox.critical(
+                    self,
+                    "Show Source",
+                    f"Der Seitenquelltext konnte nicht geöffnet werden:\\n{exc}",
+                )
+
         self.web_page.toHtml(receive_source)
 
     def show_about(self) -> None:
@@ -1493,13 +1929,19 @@ QToolTip {
             self,
             "Über CHM Viewer",
             "<h3>CHM Viewer</h3>"
-            "<p>Qt5/Chromium-basierter CHM-Viewer mit Themen, Schlüsselwörtern, Favoriten und SVG-Unterstützung.</p>"
+            "<p>Qt5/Chromium-basierter CHM-Viewer mit Themen, Schlüsselwörtern, Favoriten, SVG- und Remote-URL-Unterstützung.</p>"
             "<p>CHM-Dateien werden temporär entpackt und mit QWebEngine angezeigt.</p>",
         )
 
     def load_finished(self, success: bool) -> None:
         self.apply_content_theme()
-        self.status_bar.showMessage("Seite geladen" if success else "Die Seite konnte nicht geladen werden", 2500 if success else 5000)
+        self.status_bar.showMessage(
+            "Seite geladen" if success else "Die Seite konnte nicht geladen werden",
+            2500 if success else 5000,
+        )
+        if success:
+            QTimer.singleShot(350, self.resolve_failed_remote_images)
+            QTimer.singleShot(1200, self.resolve_failed_remote_images)
         self.update_navigation()
 
     def title_changed(self, title: str) -> None:

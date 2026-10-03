@@ -99,3 +99,64 @@ Empfohlene Prioritaet:
 ABHAENGIGKEITEN
 ---------------
     py -m pip install -r requirements.txt
+
+
+WEBENGINE / REMOTE-URLS / SVG
+-----------------------------
+Die rechte Hilfeseite darf jetzt Remote-Ressourcen laden:
+
+    QWebEngineSettings.LocalContentCanAccessRemoteUrls = True
+
+Beispiel für eine serverseitig erzeugte SVG-Grafik:
+
+    <img src="http://127.0.0.1:8080/api/ic.php?id=74ls00&rotation=90"
+         alt="74LS00">
+
+Der Server sollte für SVG liefern:
+
+    Content-Type: image/svg+xml; charset=utf-8
+
+Bei <img src="..."> ist normalerweise kein JavaScript-CORS-Zugriff nötig.
+
+Für JavaScript/fetch():
+
+    fetch("http://127.0.0.1:8080/api/ic.php?id=74ls00")
+      .then(r => r.text())
+      .then(svg => document.getElementById("target").innerHTML = svg);
+
+muss der Server CORS erlauben, z.B.:
+
+    Access-Control-Allow-Origin: *
+
+HTTP- und HTTPS-Navigation bleibt nun innerhalb der rechten QWebEngineView.
+mailto:-Links werden weiterhin im Standard-Mailprogramm geöffnet.
+
+
+SHOW SOURCE
+-----------
+Das Kontextmenü der rechten WebPage enthält eine eigene Aktion:
+
+    Show Source
+
+Die native QtWebEngine-View-Source-Aktion wird ersetzt. Der aktuelle HTML-
+Quelltext wird als UTF-8-Datei mit der Endung ".html.txt" in das temporäre
+Verzeichnis geschrieben und anschließend mit dem im Betriebssystem für
+Textdateien registrierten Standard-Editor geöffnet.
+
+Auch Bearbeiten -> Seiten-Quelltext bzw. Ctrl+U verwendet dieselbe Funktion.
+
+
+SCROLLBARS IM DARK MODE
+-----------------------
+Die Scrollbars des linken Themen-/Indexbereichs und der rechten WebEngine
+verwenden nun dieselben Grundwerte:
+
+    Breite/Höhe:   16 px
+    Track:         #163b73
+    Handle:        #245a9a
+    Hover:         #3375bd
+    Button:        #1d4d87
+    Border:        #4b79ad
+    Mindest-Handle 24 px
+
+Links werden die Werte über Qt-QSS gesetzt, rechts über WebKit/Chromium-CSS.
