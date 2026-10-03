@@ -1,0 +1,18 @@
+{
+  "viewer": "chmviewer.exe",
+  "help_file": "help/c64.chm",
+  "topics": {
+    "PRINT": {
+      "language": "basic",
+      "topic": "PRINT",
+      "context_id": 2101,
+      "local": "basic/print.html"
+    },
+    "GOTO": {
+      "language": "basic",
+      "topic": "GOTO",
+      "context_id": 2102,
+      "local": "basic/goto.html"
+    }
+  }
+}

@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>CHM Viewer – Dokumentation</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root { color-scheme: dark; }
+body {
+    margin: 0;
+    background: #111418;
+    color: #e8eaed;
+    font-family: Arial, Helvetica, sans-serif;
+    line-height: 1.55;
+}
+main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 32px 40px 80px;
+}
+h1, h2, h3, h4 {
+    color: #ffd84a;
+    margin-top: 1.5em;
+}
+h1 { font-size: 2.1rem; }
+h2 { border-bottom: 1px solid #39424c; padding-bottom: .25em; }
+p, li { max-width: 1000px; }
+pre {
+    background: #080a0d;
+    color: #d8e6ee;
+    border: 1px solid #303944;
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+}
+code {
+    font-family: Consolas, "Courier New", monospace;
+}
+hr {
+    border: 0;
+    border-top: 1px solid #39424c;
+    margin: 2em 0;
+}
+@media print {
+    :root { color-scheme: light; }
+    body { background: white; color: black; }
+    h1,h2,h3,h4 { color: black; }
+    pre { background: #f4f4f4; color: black; border-color: #bbb; }
+    main { max-width: none; padding: 0; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1>CHM Viewer – Technische und Anwender-Dokumentation</h1><p>Version: v3 – moderne + Legacy-/Delphi-kompatible Schnittstelle  </p><p>Technik: Python 3, PyQt5, QtWebEngine, Windows CHM  </p><p>Anwendung: eigenständiger CHM-Viewer und externer Hilfe-Viewer für andere Anwendungen</p><hr><h2>Inhaltsverzeichnis</h2><p>1. [Ziel und Überblick](#1-ziel-und-überblick)</p><p>2. [Funktionsumfang](#2-funktionsumfang)</p><p>3. [Systemvoraussetzungen](#3-systemvoraussetzungen)</p><p>4. [Datei- und Projektstruktur](#4-datei--und-projektstruktur)</p><p>5. [Installation](#5-installation)</p><p>6. [Programmstart](#6-programmstart)</p><p>7. [Benutzeroberfläche](#7-benutzeroberfläche)</p><p>8. [Dark Mode](#8-dark-mode)</p><p>9. [Persistente Fenster- und Splitter-Geometrie](#9-persistente-fenster--und-splitter-geometrie)</p><p>10. [CHM-Dateien öffnen und entpacken](#10-chm-dateien-öffnen-und-entpacken)</p><p>11. [Themen, Schlüsselwörter und Favoriten](#11-themen-schlüsselwörter-und-favoriten)</p><p>12. [SVG-Unterstützung](#12-svg-unterstützung)</p><p>13. [Moderne Kommandozeilenschnittstelle](#13-moderne-kommandozeilenschnittstelle)</p><p>14. [Legacy-/Delphi-Kompatibilität](#14-legacy-delphi-kompatibilität)</p><p>15. [HTML-Help-Bridge](#15-html-help-bridge)</p><p>16. [Themen-String und Context-ID](#16-themen-string-und-context-id)</p><p>17. [Priorität bei Hilfeaufrufen](#17-priorität-bei-hilfeaufrufen)</p><p>18. [Metainformationen mit JSON](#18-metainformationen-mit-json)</p><p>19. [Integration aus Python](#19-integration-aus-python)</p><p>20. [Integration aus Delphi](#20-integration-aus-delphi)</p><p>21. [Integration aus C/C++](#21-integration-aus-cc)</p><p>22. [F1-Kontexthilfe](#22-f1-kontexthilfe)</p><p>23. [CHM-Metadaten](#23-chm-metadaten)</p><p>24. [MAP- und ALIAS-Dateien](#24-map--und-alias-dateien)</p><p>25. [Interne Architektur](#25-interne-architektur)</p><p>26. [Klassen- und Funktionsreferenz](#26-klassen--und-funktionsreferenz)</p><p>27. [Navigation und URL-Behandlung](#27-navigation-und-url-behandlung)</p><p>28. [Sicherheitsmaßnahmen](#28-sicherheitsmaßnahmen)</p><p>29. [Favoriten-Speicherung](#29-favoriten-speicherung)</p><p>30. [Fehlerbehandlung und Diagnose](#30-fehlerbehandlung-und-diagnose)</p><p>31. [Bekannte Grenzen](#31-bekannte-grenzen)</p><p>32. [Empfohlene Metadaten-Konvention](#32-empfohlene-metadaten-konvention)</p><p>33. [Testplan](#33-testplan)</p><p>34. [Verteilung als EXE](#34-verteilung-als-exe)</p><p>35. [Erweiterungspunkte](#35-erweiterungspunkte)</p><p>36. [Kurzreferenz](#36-kurzreferenz)</p><hr><h1>1. Ziel und Überblick</h1><p>Der CHM Viewer ist eine eigenständige Qt5-Anwendung zur Anzeige klassischer Microsoft-CHM-Hilfedateien. Die eigentliche Darstellung der HTML-Inhalte erfolgt über QtWebEngine/Chromium anstelle des alten Microsoft-CHM-Viewers.</p><p>Dadurch können moderne HTML-Inhalte und insbesondere lokale SVG-Grafiken innerhalb der entpackten Hilfe angezeigt werden.</p><p>Der Viewer verfolgt zwei Ziele:</p><p>1. **Moderne eigene Hilfe-Schnittstelle**</p><p>   - `--topic`</p><p>   - `--context-id`</p><p>   - `--language`</p><p>   - `--keyword`</p><p>   - `--local`</p><p>2. **Kompatibilität mit älteren Hilfe-Konzepten**</p><p>   - `help.chm::/topic.html`</p><p>   - `-mapid`</p><p>   - `/context`</p><p>   - `-keyword`</p><p>   - HTML-Help-Kommandos wie `HH_HELP_CONTEXT`</p><p>Beide Varianten werden intern auf dieselbe Navigationslogik abgebildet.</p><hr><h1>2. Funktionsumfang</h1><p>Der aktuelle Viewer bietet:</p><ul><li>Öffnen einer `.chm`-Datei</li><li>Öffnen eines bereits entpackten Hilfe-Verzeichnisses</li><li>automatische CHM-Extraktion</li><li>Themenbaum aus `.hhc`</li><li>Schlüsselwortindex aus `.hhk`</li><li>Auswertung von `.hhp`</li><li>Auswertung von `[MAP]` und `[ALIAS]`</li><li>zusätzliche Suche nach `#define`-Context-IDs in Header-Dateien</li><li>direkte Navigation zu einer lokalen HTML-Seite</li><li>Navigation über Context-ID</li><li>Navigation über Topic-/Wortsuche</li><li>Navigation über Keyword</li><li>Favoriten</li><li>Zurück / Vor / Startseite</li><li>Seiten-Quelltext</li><li>globaler Dark Mode</li><li>persistente Fenstergeometrie</li><li>persistenter Splitter-Zustand</li><li>persistenter Theme-Zustand</li><li>lokale SVG-Unterstützung</li><li>Legacy-/Delphi-kompatible Kommandozeilenargumente</li><li>Source-Level-Delphi-Adapter</li></ul><hr><h1>3. Systemvoraussetzungen</h1><h2>3.1 Betriebssystem</h2><p>Der Viewer ist für Windows ausgelegt.</p><p>Die CHM-Extraktion verwendet bevorzugt:</p><pre><code>hh.exe -decompile</code></pre><p>Als Fallback kann 7-Zip verwendet werden.</p><h2>3.2 Python</h2><p>Empfohlen:</p><pre><code>Python 3.10 oder neuer</code></pre><p>Die aktuelle Entwicklung wurde mit Python 3.x erstellt.</p><h2>3.3 Python-Pakete</h2><p>Erforderlich:</p><pre><code>PyQt5
+PyQtWebEngine</code></pre><p>Installation:</p><pre><code>py -m pip install PyQt5 PyQtWebEngine</code></pre><p>oder:</p><pre><code>py -m pip install -r requirements.txt</code></pre><hr><h1>4. Datei- und Projektstruktur</h1><p>Das Paket besitzt folgende Struktur:</p><pre><code>chmviewer_package_v3_legacy_compat/
+│
+├── chmviewer.py
+├── requirements.txt
+├── README.txt
+├── helpmeta.example.json
+│
+└── delphi/
+    └── ChmViewerCompat.pas</code></pre><h2>Bedeutung</h2><h3>`chmviewer.py`</h3><p>Hauptprogramm mit:</p><ul><li>Qt5-GUI</li><li>CHM-Extraktion</li><li>Themen-/Keywordparser</li><li>Context-ID-Auswertung</li><li>Navigation</li><li>Theme</li><li>CLI-Kompatibilität</li></ul><h3>`requirements.txt`</h3><p>Python-Abhängigkeiten.</p><h3>`helpmeta.example.json`</h3><p>Beispiel für Metainformationen einer aufrufenden Anwendung.</p><h3>`delphi/ChmViewerCompat.pas`</h3><p>Delphi-Adapter für Source-Level-Kompatibilität.</p><hr><h1>5. Installation</h1><h2>5.1 Virtuelle Umgebung</h2><p>Optional:</p><pre><code>py -m venv .venv
+.venv\Scripts\activate</code></pre><p>Danach:</p><pre><code>py -m pip install -r requirements.txt</code></pre><h2>5.2 Funktionstest</h2><pre><code>py chmviewer.py</code></pre><p>Es erscheint das leere Hauptfenster des Viewers.</p><hr><h1>6. Programmstart</h1><h2>6.1 Ohne Datei</h2><pre><code>py chmviewer.py</code></pre><h2>6.2 CHM direkt öffnen</h2><pre><code>py chmviewer.py help.chm</code></pre><h2>6.3 Entpacktes Hilfe-Verzeichnis</h2><pre><code>py chmviewer.py help\</code></pre><h2>6.4 Dark Mode erzwingen</h2><pre><code>py chmviewer.py help.chm --dark</code></pre><h2>6.5 Light Mode erzwingen</h2><pre><code>py chmviewer.py help.chm --light</code></pre><p>Ohne `--dark` oder `--light` wird der zuletzt gespeicherte Modus verwendet.</p><hr><h1>7. Benutzeroberfläche</h1><p>Die Anwendung basiert auf `QMainWindow`.</p><p>Die grobe Struktur lautet:</p><pre><code>QMainWindow
+│
+├── Menüleiste
+├── Navigations-Toolbar
+├── CentralWidget
+│   └── QSplitter
+│       ├── QTabWidget
+│       │   ├── Themen
+│       │   ├── Schlüsselwörter
+│       │   └── Favoriten
+│       │
+│       └── QWebEngineView
+│
+└── StatusBar</code></pre><h2>7.1 Menü Datei</h2><p>Enthält:</p><ul><li>Hilfe öffnen …</li><li>Hilfe-Verzeichnis öffnen …</li><li>Programm beenden</li></ul><h2>7.2 Menü Bearbeiten</h2><p>Enthält:</p><ul><li>Kopieren</li><li>Seiten-Quelltext</li></ul><h2>7.3 Menü Ansicht</h2><p>Enthält:</p><ul><li>Dark Mode</li></ul><h2>7.4 Menü Hilfe</h2><p>Enthält:</p><ul><li>Über …</li></ul><h2>7.5 Toolbar</h2><p>Enthält:</p><ul><li>Hilfe öffnen</li><li>Start</li><li>Zurück</li><li>Vor</li></ul><hr><h1>8. Dark Mode</h1><p>Der Dark Mode gilt für die gesamte QApplication.</p><p>Damit werden nicht nur HTML-Seiten, sondern auch Qt-Widgets angepasst:</p><ul><li>Hauptfenster</li><li>Menüs</li><li>Toolbar</li><li>Statusbar</li><li>Eingabefelder</li><li>QTreeWidget</li><li>Tabs</li><li>Dialoge</li><li>Buttons</li><li>Quelltextfenster</li><li>Tooltips</li><li>WebEngine-Hintergrund</li></ul><h2>8.1 Umsetzung</h2><p>Der Viewer benutzt:</p><pre><code>QApplication.setPalette(...)
+QApplication.setStyleSheet(...)</code></pre><p>Für den Web-Inhalt wird zusätzlich CSS injiziert.</p><h2>8.2 Persistenz</h2><p>Der Theme-Zustand wird über `QSettings` gespeichert:</p><pre><code>ui/dark_mode</code></pre><hr><h1>9. Persistente Fenster- und Splitter-Geometrie</h1><p>Beim Schließen speichert der Viewer:</p><pre><code>ui/window_geometry
+ui/window_state
+ui/main_splitter_state
+ui/dark_mode</code></pre><p>Verwendete Qt-Funktionen:</p><pre><code>saveGeometry()
+restoreGeometry()
+
+saveState()
+restoreState()
+
+QSplitter.saveState()
+QSplitter.restoreState()</code></pre><p>Die Wiederherstellung erfolgt bereits im Konstruktor vor dem ersten sichtbaren `show()`.</p><p>Dadurch erscheint das Fenster beim nächsten Start direkt:</p><ul><li>an der alten Position</li><li>in der alten Größe</li><li>mit dem vorherigen Splitter-Verhältnis</li><li>im vorherigen Theme</li></ul><hr><h1>10. CHM-Dateien öffnen und entpacken</h1><p>Eine CHM-Datei wird nicht direkt durch Chromium gelesen.</p><p>Stattdessen:</p><pre><code>CHM
+ │
+ ▼
+temporäres Verzeichnis
+ │
+ ├── HTML
+ ├── CSS
+ ├── JavaScript
+ ├── Bilder
+ ├── SVG
+ ├── HHC
+ ├── HHK
+ └── HHP
+ │
+ ▼
+QWebEngineView</code></pre><h2>10.1 Primärer Extraktor</h2><p>Unter Windows wird zuerst `hh.exe` gesucht.</p><p>Typische Kandidaten:</p><pre><code>%WINDIR%\hh.exe
+%WINDIR%\System32\hh.exe
+%WINDIR%\SysWOW64\hh.exe</code></pre><p>Aufruf:</p><pre><code>hh.exe -decompile &lt;Zielverzeichnis&gt; &lt;Datei.chm&gt;</code></pre><p>Der Viewer wartet bis zu etwa acht Sekunden auf extrahierte Inhalte.</p><h2>10.2 Fallback</h2><p>Ist `hh.exe` nicht erfolgreich, wird nach folgenden Programmen gesucht:</p><pre><code>7z
+7za
+7zr</code></pre><p>Beispiel:</p><pre><code>7z x -y -o&lt;Ziel&gt; help.chm</code></pre><h2>10.3 Temporäre Dateien</h2><p>Das entpackte CHM wird in einem temporären Verzeichnis abgelegt.</p><p>Beim Schließen wird dieses Verzeichnis bereinigt.</p><hr><h1>11. Themen, Schlüsselwörter und Favoriten</h1><h2>11.1 Themen</h2><p>Der Themenbaum wird normalerweise aus einer `.hhc`-Datei gelesen.</p><p>Die Sitemap wird mit `HTMLParser` ausgewertet.</p><p>Typische Struktur:</p><pre><code>&lt;OBJECT type=&quot;text/sitemap&quot;&gt;
+  &lt;param name=&quot;Name&quot; value=&quot;PRINT&quot;&gt;
+  &lt;param name=&quot;Local&quot; value=&quot;basic/print.html&quot;&gt;
+&lt;/OBJECT&gt;</code></pre><h2>11.2 Schlüsselwörter</h2><p>Der Schlüsselwortindex wird aus `.hhk` gelesen.</p><p>Auch hier wird das klassische `text/sitemap`-Format verarbeitet.</p><h2>11.3 Fallback ohne HHC</h2><p>Ist keine Themen-Sitemap vorhanden, durchsucht der Viewer das Hilfeverzeichnis nach:</p><pre><code>*.html
+*.htm</code></pre><p>und erzeugt daraus einen einfachen Themenbaum.</p><hr><h1>12. SVG-Unterstützung</h1><p>Die Inhalte werden mit `QWebEngineView` dargestellt.</p><p>Daher können lokale SVG-Dateien eingebunden werden:</p><pre><code>&lt;img src=&quot;images/74ls00.svg&quot; alt=&quot;74LS00&quot;&gt;</code></pre><p>Voraussetzung ist, dass die SVG-Datei beim Entpacken Bestandteil der Hilfe ist.</p><p>Die Einstellung:</p><pre><code>QWebEngineSettings.LocalContentCanAccessFileUrls = True</code></pre><p>erlaubt lokalen HTML-Dateien Zugriff auf weitere lokale Ressourcen.</p><p>Der Remote-Zugriff lokaler Inhalte wird dagegen deaktiviert:</p><pre><code>QWebEngineSettings.LocalContentCanAccessRemoteUrls = False</code></pre><hr><h1>13. Moderne Kommandozeilenschnittstelle</h1><h2>13.1 Topic</h2><pre><code>chmviewer.exe help.chm --topic PRINT</code></pre><h2>13.2 Topic mit Sprache</h2><pre><code>chmviewer.exe help.chm --topic PRINT --language basic</code></pre><h2>13.3 Context-ID</h2><pre><code>chmviewer.exe help.chm --context-id 2101</code></pre><p>Auch hexadezimale IDs sind möglich:</p><pre><code>chmviewer.exe help.chm --context-id 0x835</code></pre><h2>13.4 Context-ID mit Topic-Fallback</h2><p>Empfohlen:</p><pre><code>chmviewer.exe help.chm ^
+    --context-id 2101 ^
+    --topic PRINT ^
+    --language basic</code></pre><p>Kann die ID nicht aufgelöst werden, steht weiterhin der lesbare Topic-String zur Verfügung.</p><h2>13.5 Direkte HTML-Seite</h2><pre><code>chmviewer.exe help.chm --local basic/print.html</code></pre><h2>13.6 Keyword</h2><pre><code>chmviewer.exe help.chm --keyword PRINT</code></pre><h2>13.7 Alter Parameter `--word`</h2><p>Bleibt kompatibel:</p><pre><code>chmviewer.exe help.chm --word PRINT</code></pre><p>`--word` ist ein Alias für `--topic`.</p><hr><h1>14. Legacy-/Delphi-Kompatibilität</h1><p>Der Viewer akzeptiert mehrere ältere Schreibweisen.</p><h2>14.1 Klassischer CHM-Pfad</h2><pre><code>chmviewer.exe &quot;help.chm::/basic/print.html&quot;</code></pre><p>Auch diese Formen werden erkannt:</p><pre><code>mk:@MSITStore:help.chm::/basic/print.html
+ms-its:help.chm::/basic/print.html</code></pre><h2>14.2 Context-ID</h2><pre><code>chmviewer.exe -mapid 2101 help.chm</code></pre><p>Weitere akzeptierte Aliase:</p><pre><code>-mapid
+-context
+-contextid
+
+/mapid
+/context
+/contextid</code></pre><h2>14.3 Keyword</h2><pre><code>chmviewer.exe -keyword PRINT help.chm</code></pre><p>oder:</p><pre><code>chmviewer.exe /keyword PRINT help.chm</code></pre><h2>14.4 Direkte Seite</h2><pre><code>chmviewer.exe -topic basic/print.html help.chm</code></pre><p>oder:</p><pre><code>chmviewer.exe /topic basic/print.html help.chm</code></pre><p>Bei Legacy-Aufrufen bedeutet `-topic` beziehungsweise `/topic` einen direkten lokalen Pfad.</p><p>Beim modernen Aufruf bedeutet:</p><pre><code>--topic</code></pre><p>dagegen einen lesbaren Suchbegriff.</p><p>Dieser Unterschied ist bewusst gewählt.</p><hr><h1>15. HTML-Help-Bridge</h1><p>Der Viewer besitzt zusätzlich eine explizite Bridge für bekannte HTML-Help-Kommandos.</p><p>Unterstützt sind derzeit:</p><pre><code>HH_DISPLAY_TOPIC  = 0x0000
+HH_KEYWORD_LOOKUP = 0x000D
+HH_HELP_CONTEXT   = 0x000F</code></pre><h2>15.1 HH_HELP_CONTEXT</h2><pre><code>chmviewer.exe help.chm ^
+    --hh-command HH_HELP_CONTEXT ^
+    --hh-data 2101</code></pre><h2>15.2 HH_DISPLAY_TOPIC</h2><pre><code>chmviewer.exe help.chm ^
+    --hh-command HH_DISPLAY_TOPIC ^
+    --hh-data basic/print.html</code></pre><h2>15.3 HH_KEYWORD_LOOKUP</h2><pre><code>chmviewer.exe help.chm ^
+    --hh-command HH_KEYWORD_LOOKUP ^
+    --hh-data PRINT</code></pre><h2>15.4 Numerischer Command</h2><p>Der Command darf auch numerisch übergeben werden.</p><p>Beispiel:</p><pre><code>chmviewer.exe help.chm --hh-command 0x000F --hh-data 2101</code></pre><hr><h1>16. Themen-String und Context-ID</h1><p>Für neue Anwendungen wird empfohlen, nicht nur eine einzige Information zu speichern.</p><p>Optimal ist:</p><pre><code>Topic       = PRINT
+Context-ID  = 2101
+Language    = basic
+Local       = basic/print.html</code></pre><p>Warum?</p><h3>Context-ID</h3><p>Vorteil:</p><ul><li>stabil</li><li>schnell</li><li>klassisches Hilfe-Konzept</li><li>gut für F1-Hilfe</li></ul><p>Nachteil:</p><ul><li>für Menschen nicht lesbar</li><li>Zuordnung muss in CHM-Metadaten vorhanden sein</li></ul><h3>Topic</h3><p>Vorteil:</p><ul><li>lesbar</li><li>funktioniert als Fallback</li></ul><p>Nachteil:</p><ul><li>mehrere gleichnamige Themen möglich</li></ul><h3>Local</h3><p>Vorteil:</p><ul><li>eindeutig</li></ul><p>Nachteil:</p><ul><li>Pfad kann sich bei Umstrukturierung ändern</li></ul><h3>Sprache</h3><p>Verfeinert einen Topic-Treffer.</p><hr><h1>17. Priorität bei Hilfeaufrufen</h1><p>`set_pending_request()` speichert eine Anfrage.</p><p>Beim Öffnen wird sie in folgender Reihenfolge verarbeitet:</p><pre><code>1. Local
+2. Context-ID / Topic
+3. Keyword
+4. Topic-Fallback</code></pre><p>Genauer:</p><pre><code>pending_local
+    │
+    ├─ gefunden → öffnen
+    └─ nicht gefunden
+          │
+          ▼
+context_id oder topic
+          │
+          ├─ Context-ID erfolgreich → öffnen
+          ├─ Topic erfolgreich      → öffnen
+          └─ kein Treffer
+                │
+                ▼
+keyword</code></pre><hr><h1>18. Metainformationen mit JSON</h1><p>Das Paket enthält:</p><pre><code>helpmeta.example.json</code></pre><p>Beispiel:</p><pre><code>{
+  &quot;viewer&quot;: &quot;chmviewer.exe&quot;,
+  &quot;help_file&quot;: &quot;help/c64.chm&quot;,
+  &quot;topics&quot;: {
+    &quot;PRINT&quot;: {
+      &quot;language&quot;: &quot;basic&quot;,
+      &quot;topic&quot;: &quot;PRINT&quot;,
+      &quot;context_id&quot;: 2101,
+      &quot;local&quot;: &quot;basic/print.html&quot;
+    },
+    &quot;GOTO&quot;: {
+      &quot;language&quot;: &quot;basic&quot;,
+      &quot;topic&quot;: &quot;GOTO&quot;,
+      &quot;context_id&quot;: 2102,
+      &quot;local&quot;: &quot;basic/goto.html&quot;
+    }
+  }
+}</code></pre><h2>Empfehlung</h2><p>Für jedes Hilfethema:</p><pre><code>{
+  &quot;language&quot;: &quot;...&quot;,
+  &quot;topic&quot;: &quot;...&quot;,
+  &quot;context_id&quot;: 0,
+  &quot;local&quot;: &quot;...&quot;
+}</code></pre><hr><h1>19. Integration aus Python</h1><h2>19.1 Einfacher Topic-Aufruf</h2><pre><code>import subprocess
+
+subprocess.Popen([
+    &quot;chmviewer.exe&quot;,
+    &quot;help/c64.chm&quot;,
+    &quot;--topic&quot;,
+    &quot;PRINT&quot;,
+])</code></pre><h2>19.2 Mit Context-ID</h2><pre><code>subprocess.Popen([
+    &quot;chmviewer.exe&quot;,
+    &quot;help/c64.chm&quot;,
+    &quot;--topic&quot;, &quot;PRINT&quot;,
+    &quot;--language&quot;, &quot;basic&quot;,
+    &quot;--context-id&quot;, &quot;2101&quot;,
+])</code></pre><h2>19.3 Metadaten verwenden</h2><pre><code>HELP = {
+    &quot;PRINT&quot;: {
+        &quot;language&quot;: &quot;basic&quot;,
+        &quot;context_id&quot;: 2101,
+        &quot;local&quot;: &quot;basic/print.html&quot;,
+    },
+}
+
+def show_help(topic):
+    topic = topic.upper()
+    meta = HELP.get(topic)
+
+    if not meta:
+        return False
+
+    args = [
+        &quot;chmviewer.exe&quot;,
+        &quot;help/c64.chm&quot;,
+        &quot;--topic&quot;, topic,
+        &quot;--language&quot;, meta[&quot;language&quot;],
+        &quot;--context-id&quot;, str(meta[&quot;context_id&quot;]),
+    ]
+
+    subprocess.Popen(args)
+    return True</code></pre><hr><h1>20. Integration aus Delphi</h1><p>Das mitgelieferte Unit:</p><pre><code>delphi\ChmViewerCompat.pas</code></pre><p>definiert:</p><pre><code>HH_DISPLAY_TOPIC
+HH_KEYWORD_LOOKUP
+HH_HELP_CONTEXT</code></pre><p>und folgende Funktionen:</p><pre><code>ChmViewerTopic(...)
+ChmViewerContext(...)
+ChmViewerKeyword(...)
+ChmViewerHtmlHelp(...)</code></pre><h2>20.1 Topic</h2><pre><code>ChmViewerTopic(
+  &#x27;chmviewer.exe&#x27;,
+  &#x27;help\c64.chm&#x27;,
+  &#x27;basic\print.html&#x27;
+);</code></pre><h2>20.2 Context-ID</h2><pre><code>ChmViewerContext(
+  &#x27;chmviewer.exe&#x27;,
+  &#x27;help\c64.chm&#x27;,
+  2101
+);</code></pre><h2>20.3 Keyword</h2><pre><code>ChmViewerKeyword(
+  &#x27;chmviewer.exe&#x27;,
+  &#x27;help\c64.chm&#x27;,
+  &#x27;PRINT&#x27;
+);</code></pre><h2>20.4 HTML-Help-artige API</h2><pre><code>ChmViewerHtmlHelp(
+  &#x27;chmviewer.exe&#x27;,
+  &#x27;help\c64.chm&#x27;,
+  HH_HELP_CONTEXT,
+  &#x27;&#x27;,
+  2101
+);</code></pre><p>Direktes Thema:</p><pre><code>ChmViewerHtmlHelp(
+  &#x27;chmviewer.exe&#x27;,
+  &#x27;help\c64.chm&#x27;,
+  HH_DISPLAY_TOPIC,
+  &#x27;basic\print.html&#x27;,
+  0
+);</code></pre><hr><h1>21. Integration aus C/C++</h1><p>Der Viewer kann mit `CreateProcessW`, `ShellExecuteW` oder ähnlichen Mechanismen gestartet werden.</p><p>Beispiel mit `ShellExecuteW`:</p><pre><code>#include &lt;windows.h&gt;
+
+void ShowHelpContext()
+{
+    ShellExecuteW(
+        nullptr,
+        L&quot;open&quot;,
+        L&quot;chmviewer.exe&quot;,
+        L&quot;\&quot;help\\c64.chm\&quot; --context-id 2101 --topic PRINT&quot;,
+        nullptr,
+        SW_SHOWNORMAL
+    );
+}</code></pre><p>Direktes Thema:</p><pre><code>ShellExecuteW(
+    nullptr,
+    L&quot;open&quot;,
+    L&quot;chmviewer.exe&quot;,
+    L&quot;\&quot;help\\c64.chm::/basic/print.html\&quot;&quot;,
+    nullptr,
+    SW_SHOWNORMAL
+);</code></pre><hr><h1>22. F1-Kontexthilfe</h1><p>Ein typischer Ablauf in einer IDE oder einem Editor:</p><pre><code>Benutzer drückt F1
+       │
+       ▼
+Wort unter Cursor bestimmen
+       │
+       ▼
+Metadaten nachschlagen
+       │
+       ├── Topic
+       ├── Context-ID
+       ├── Sprache
+       └── Local
+       │
+       ▼
+chmviewer.exe starten</code></pre><p>Beispiel:</p><pre><code>def handle_f1(word):
+    word = word.strip().upper()
+
+    args = [
+        &quot;chmviewer.exe&quot;,
+        &quot;help/c64.chm&quot;,
+        &quot;--topic&quot;, word,
+        &quot;--language&quot;, &quot;basic&quot;,
+    ]
+
+    context_id = BASIC_HELP_IDS.get(word, 0)
+    if context_id:
+        args += [&quot;--context-id&quot;, str(context_id)]
+
+    subprocess.Popen(args)</code></pre><hr><h1>23. CHM-Metadaten</h1><p>Die wichtigsten klassischen Dateien:</p><pre><code>*.hhp  Projekt
+*.hhc  Contents / Themen
+*.hhk  Index / Schlüsselwörter
+*.h    Context-ID-Konstanten</code></pre><h2>23.1 HHP</h2><p>Aus `[OPTIONS]` werden insbesondere berücksichtigt:</p><pre><code>Contents file
+Index file
+Default topic</code></pre><h2>23.2 HHC</h2><p>Erzeugt den Themenbaum.</p><h2>23.3 HHK</h2><p>Erzeugt den Schlüsselwortbaum.</p><hr><h1>24. MAP- und ALIAS-Dateien</h1><p>Für numerische Context-IDs werden `[MAP]` und `[ALIAS]` aus der HHP ausgewertet.</p><p>Beispiel:</p><pre><code>[MAP]
+#define IDH_PRINT 2101
+#define IDH_GOTO  2102
+
+[ALIAS]
+IDH_PRINT=basic/print.html
+IDH_GOTO=basic/goto.html</code></pre><p>Alternativ können Definitionen auch in Header-Dateien stehen:</p><pre><code>#define IDH_PRINT 2101
+#define IDH_GOTO  2102</code></pre><p>Der Viewer durchsucht dazu `*.h` im entpackten Hilfeverzeichnis.</p><p>Das Ergebnis ist intern:</p><pre><code>{
+    2101: &quot;basic/print.html&quot;,
+    2102: &quot;basic/goto.html&quot;
+}</code></pre><hr><h1>25. Interne Architektur</h1><h2>25.1 Datenfluss</h2><pre><code>Kommandozeile
+      │
+      ▼
+normalize_legacy_argv()
+      │
+      ▼
+parse_args()
+      │
+      ├── modern
+      ├── legacy
+      └── HH bridge
+      │
+      ▼
+MainWindow.set_pending_request()
+      │
+      ▼
+CHM öffnen / entpacken
+      │
+      ▼
+HHC / HHK / HHP / MAP / ALIAS lesen
+      │
+      ▼
+apply_pending_help_request()
+      │
+      ▼
+QWebEngineView</code></pre><h2>25.2 GUI-Struktur</h2><pre><code>MainWindow
+├── Actions
+├── MenuBar
+├── ToolBar
+├── QSplitter
+│   ├── QTabWidget
+│   │   ├── ChmSearchTab Topics
+│   │   ├── ChmSearchTab Keywords
+│   │   └── ChmSearchTab Favorites
+│   └── QWebEngineView
+└── QStatusBar</code></pre><hr><h1>26. Klassen- und Funktionsreferenz</h1><h2>`ChmSitemapEntry`</h2><p>Dataclass:</p><pre><code>title: str
+local: str
+children: List[ChmSitemapEntry]</code></pre><p>Repräsentiert einen HHC-/HHK-Eintrag.</p><hr><h2>`ChmSitemapParser`</h2><p>Parser für klassische HTML-Help-Sitemaps.</p><p>Wichtige Methoden:</p><pre><code>handle_starttag()
+handle_endtag()</code></pre><p>Liest insbesondere:</p><pre><code>&lt;object type=&quot;text/sitemap&quot;&gt;
+&lt;param name=&quot;Name&quot; ...&gt;
+&lt;param name=&quot;Local&quot; ...&gt;</code></pre><hr><h2>`ChmExtractor`</h2><p>Verantwortlich für das Entpacken.</p><p>Methode:</p><pre><code>ChmExtractor.extract(source, destination)</code></pre><p>Priorität:</p><pre><code>hh.exe
+   ↓
+7-Zip</code></pre><hr><h2>`ChmSearchTab`</h2><p>Wiederverwendbarer Tab mit:</p><ul><li>`QLineEdit`</li><li>Suchbutton</li><li>`QTreeWidget`</li></ul><p>Signal:</p><pre><code>search_requested = pyqtSignal(str)</code></pre><hr><h2>`ChmWebPage`</h2><p>Unterklasse von:</p><pre><code>QWebEnginePage</code></pre><p>Behandelt:</p><ul><li>interne `mk:`-/`ms-its:`-Links</li><li>externe HTTP-/HTTPS-/Mail-Links</li></ul><p>Externe Links werden über:</p><pre><code>QDesktopServices.openUrl()</code></pre><p>geöffnet.</p><hr><h2>`ChmSourceDialog`</h2><p>Zeigt den HTML-Quelltext der aktuellen Seite.</p><hr><h2>`MainWindow`</h2><p>Zentrale Hauptklasse.</p><h3>Wichtige Methoden</h3><pre><code>open_chm()
+open_help_directory()
+
+read_metadata()
+populate_tree()
+
+load_local()
+open_context_topic()
+open_keyword_topic()
+
+set_pending_request()
+apply_pending_help_request()
+
+add_current_favorite()
+remove_current_favorite()
+
+set_dark_mode()
+
+save_ui_state()
+restore_ui_state()</code></pre><hr><h2>`clean_chm_local()`</h2><p>Normalisiert interne CHM-Pfade.</p><p>Verarbeitet unter anderem:</p><pre><code>mk:@MSITStore:
+ms-its:
+its:
+::/
+#
+URL-Encoding
+Backslashes</code></pre><p>Verhindert außerdem Pfade mit `..`.</p><hr><h2>`resolve_chm_path()`</h2><p>Löst einen internen Pfad im entpackten CHM auf.</p><p>Enthält einen case-insensitiven Fallback.</p><p>Das ist wichtig, weil CHM-Hilfen häufig inkonsistente Groß-/Kleinschreibung enthalten.</p><hr><h2>`read_chm_context_map()`</h2><p>Erzeugt:</p><pre><code>Dict[int, str]</code></pre><p>aus:</p><ul><li>`[MAP]`</li><li>`[ALIAS]`</li><li>`*.h`</li></ul><hr><h2>`normalize_legacy_argv()`</h2><p>Übersetzt bekannte alte Argumente.</p><p>Beispiel:</p><pre><code>/context    -&gt; --context-id
+/mapid      -&gt; --context-id
+/keyword    -&gt; --keyword
+/topic      -&gt; --local</code></pre><hr><h2>`split_chm_reference()`</h2><p>Zerlegt:</p><pre><code>help.chm::/basic/print.html</code></pre><p>in:</p><pre><code>CHM-Datei = help.chm
+Local     = basic/print.html</code></pre><hr><h2>`normalize_hh_command()`</h2><p>Akzeptiert:</p><pre><code>HH_HELP_CONTEXT
+HELP_CONTEXT
+CONTEXT
+0x000F
+15</code></pre><hr><h1>27. Navigation und URL-Behandlung</h1><h2>27.1 Lokale Seiten</h2><p>Interne Seiten werden mit:</p><pre><code>QUrl.fromLocalFile(...)</code></pre><p>geladen.</p><h2>27.2 Fragmente</h2><p>Auch Anchor-Links werden unterstützt:</p><pre><code>basic/print.html#syntax</code></pre><h2>27.3 Externe Links</h2><p>Folgende Schemes können extern geöffnet werden:</p><pre><code>http
+https
+mailto</code></pre><h2>27.4 Remote-Inhalte</h2><p>Die Einstellung:</p><pre><code>LocalContentCanAccessRemoteUrls = False</code></pre><p>verhindert, dass eine lokale Hilfeseite beliebig Remote-Ressourcen lädt.</p><hr><h1>28. Sicherheitsmaßnahmen</h1><p>Der Viewer enthält mehrere Schutzmaßnahmen.</p><h2>28.1 Pfadnormalisierung</h2><p>`clean_chm_local()` verwirft:</p><pre><code>../</code></pre><p>Dadurch sollen Pfade nicht aus dem entpackten Root herausführen.</p><h2>28.2 Root-Prüfung</h2><p>`resolve_chm_path()` kontrolliert über `Path.resolve()` und `relative_to()`, dass die Datei im Hilfe-Root liegt.</p><h2>28.3 Remote-Zugriff</h2><p>Lokale Seiten dürfen nicht automatisch Remote-URLs nachladen.</p><h2>28.4 Externe Links</h2><p>HTTP/HTTPS/Mailto werden aus der WebEngine heraus an das Betriebssystem übergeben.</p><hr><h1>29. Favoriten-Speicherung</h1><p>Favoriten werden mit `QSettings` gespeichert.</p><p>Für jede Hilfe gibt es einen separaten Schlüssel.</p><p>Dieser wird aus dem Hilfe-Pfad erzeugt:</p><pre><code>SHA-256(CHM-Pfad)</code></pre><p>Schema:</p><pre><code>chm/favorites/&lt;hash&gt;</code></pre><p>Gespeicherter Inhalt:</p><pre><code>[
+  {
+    &quot;title&quot;: &quot;PRINT&quot;,
+    &quot;local&quot;: &quot;basic/print.html&quot;
+  }
+]</code></pre><p>Dadurch vermischen sich Favoriten verschiedener Hilfedateien nicht.</p><hr><h1>30. Fehlerbehandlung und Diagnose</h1><h2>30.1 PyQt fehlt</h2><p>Meldung:</p><pre><code>PyQt5 / PyQtWebEngine fehlt.</code></pre><p>Abhilfe:</p><pre><code>py -m pip install PyQt5 PyQtWebEngine</code></pre><h2>30.2 CHM kann nicht entpackt werden</h2><p>Prüfen:</p><pre><code>hh.exe vorhanden?
+7z vorhanden?
+CHM beschädigt?
+Schreibrecht im Temp-Verzeichnis?</code></pre><h2>30.3 Topic wird nicht gefunden</h2><p>Prüfen:</p><p>1. Ist es in `.hhc` oder `.hhk` vorhanden?</p><p>2. Entspricht der Dateiname dem Topic?</p><p>3. Stimmt `--language`?</p><p>4. Gibt es eine Context-ID?</p><p>5. Ist der Local-Pfad korrekt?</p><h2>30.4 Context-ID wird nicht gefunden</h2><p>Prüfen:</p><pre><code>[MAP]
+...
+[ALIAS]
+...</code></pre><p>sowie Header-Dateien.</p><h2>30.5 SVG wird nicht angezeigt</h2><p>Prüfen:</p><ul><li>SVG in CHM enthalten?</li><li>relativer Pfad korrekt?</li><li>Datei nach Extraktion vorhanden?</li><li>HTML verweist auf lokalen Pfad?</li></ul><hr><h1>31. Bekannte Grenzen</h1><h2>31.1 Kein echter Ersatz für `hhctrl.ocx`</h2><p>Der aktuelle Delphi-Adapter ist Source-Level-Kompatibilität.</p><p>Das bedeutet:</p><p>Eine Delphi-Anwendung, die neu kompiliert wird, kann:</p><pre><code>ChmViewerContext(...)</code></pre><p>verwenden.</p><p>Eine bereits kompilierte EXE, die intern direkt:</p><pre><code>HtmlHelpA()
+HtmlHelpW()
+hhctrl.ocx</code></pre><p>aufruft, wird nicht automatisch umgeleitet.</p><p>Dafür wäre ein zusätzlicher nativer Proxy nötig.</p><h2>31.2 Noch nicht alle HTML-Help-Kommandos</h2><p>Aktuell werden explizit unterstützt:</p><pre><code>HH_DISPLAY_TOPIC
+HH_KEYWORD_LOOKUP
+HH_HELP_CONTEXT</code></pre><p>Andere Kommandos benötigen zusätzliche Adapterlogik.</p><h2>31.3 CHM-Extraktion</h2><p>`hh.exe -decompile` ist ein pragmatischer Weg.</p><p>Ungewöhnliche oder beschädigte CHMs können trotzdem Probleme verursachen.</p><hr><h1>32. Empfohlene Metadaten-Konvention</h1><p>Für das d64_dism-/dBase2Many-Projekt empfiehlt sich eine zentrale Hilfe-Metadatendatei.</p><p>Beispiel:</p><pre><code>{
+  &quot;basic&quot;: {
+    &quot;PRINT&quot;: {
+      &quot;context_id&quot;: 2101,
+      &quot;local&quot;: &quot;basic/print.html&quot;
+    },
+    &quot;GOTO&quot;: {
+      &quot;context_id&quot;: 2102,
+      &quot;local&quot;: &quot;basic/goto.html&quot;
+    }
+  },
+  &quot;pascal&quot;: {
+    &quot;WRITELN&quot;: {
+      &quot;context_id&quot;: 3101,
+      &quot;local&quot;: &quot;pascal/writeln.html&quot;
+    }
+  }
+}</code></pre><p>Vorteil:</p><pre><code>Editor
+Compiler
+GUI
+F1-Hilfe
+CHM</code></pre><p>greifen auf dieselben IDs zu.</p><hr><h1>33. Testplan</h1><h2>33.1 Grundstart</h2><pre><code>[ ] Viewer startet ohne Datei
+[ ] Viewer startet mit CHM
+[ ] Viewer startet mit Verzeichnis</code></pre><h2>33.2 Theme</h2><pre><code>[ ] Dark Mode färbt gesamte Anwendung
+[ ] Light Mode funktioniert
+[ ] Theme wird gespeichert
+[ ] Theme ist beim Neustart sofort aktiv</code></pre><h2>33.3 Geometrie</h2><pre><code>[ ] Fensterposition speichern
+[ ] Fenstergröße speichern
+[ ] maximierter Zustand speichern
+[ ] Splitterposition speichern
+[ ] Wiederherstellung vor erstem Anzeigen</code></pre><h2>33.4 CHM</h2><pre><code>[ ] HHP lesen
+[ ] HHC lesen
+[ ] HHK lesen
+[ ] Default Topic
+[ ] SVG darstellen
+[ ] relative Bilder darstellen</code></pre><h2>33.5 Context</h2><pre><code>[ ] --topic PRINT
+[ ] --word PRINT
+[ ] --context-id 2101
+[ ] --context-id + --topic
+[ ] --keyword PRINT
+[ ] --local basic/print.html</code></pre><h2>33.6 Legacy</h2><pre><code>[ ] help.chm::/basic/print.html
+[ ] -mapid 2101 help.chm
+[ ] /context 2101 help.chm
+[ ] -keyword PRINT help.chm
+[ ] /topic basic/print.html help.chm</code></pre><h2>33.7 HTML Help</h2><pre><code>[ ] HH_HELP_CONTEXT
+[ ] HH_DISPLAY_TOPIC
+[ ] HH_KEYWORD_LOOKUP</code></pre><h2>33.8 Favoriten</h2><pre><code>[ ] hinzufügen
+[ ] Doppelanlage verhindern
+[ ] entfernen
+[ ] Neustart
+[ ] getrennte Favoriten pro CHM</code></pre><hr><h1>34. Verteilung als EXE</h1><p>Eine mögliche PyInstaller-Erzeugung:</p><pre><code>pyinstaller ^
+    --noconsole ^
+    --onefile ^
+    --name chmviewer ^
+    chmviewer.py</code></pre><p>Bei QtWebEngine kann eine `--onedir`-Variante robuster sein:</p><pre><code>pyinstaller ^
+    --noconsole ^
+    --onedir ^
+    --name chmviewer ^
+    chmviewer.py</code></pre><p>Nach dem Build sollte geprüft werden:</p><pre><code>QtWebEngineProcess
+resources
+translations
+platforms</code></pre><p>PyInstaller sammelt diese Komponenten normalerweise über die Qt-Hooks ein.</p><p>Für deine Anwendung bietet sich an:</p><pre><code>Programm.exe
+chmviewer.exe
+help\
+    c64.chm</code></pre><hr><h1>35. Erweiterungspunkte</h1><h2>35.1 Nativer `HtmlHelp`-Proxy</h2><p>Für Binärkompatibilität mit bereits kompilierten Anwendungen könnte später eine native DLL entstehen.</p><p>Denkbares Konzept:</p><pre><code>alte Anwendung
+     │
+     ▼
+HtmlHelpW(...)
+     │
+     ▼
+Kompatibilitäts-DLL
+     │
+     ▼
+chmviewer.exe</code></pre><h2>35.2 Single-Instance-Viewer</h2><p>Derzeit startet jeder Hilfeaufruf einen eigenen Prozess.</p><p>Eine spätere Erweiterung könnte:</p><ul><li>vorhandene Instanz erkennen</li><li>Topic über Named Pipe / Local Socket senden</li><li>bestehendes Fenster nach vorne holen</li></ul><h2>35.3 Weitere HH-Kommandos</h2><p>Mögliche Ergänzungen:</p><pre><code>HH_DISPLAY_INDEX
+HH_DISPLAY_SEARCH
+HH_SET_WIN_TYPE
+HH_GET_WIN_TYPE</code></pre><h2>35.4 Programmierschnittstelle</h2><p>Zusätzlich zur Kommandozeile könnte eine IPC-Schnittstelle eingeführt werden:</p><pre><code>{
+  &quot;command&quot;: &quot;help&quot;,
+  &quot;file&quot;: &quot;c64.chm&quot;,
+  &quot;topic&quot;: &quot;PRINT&quot;,
+  &quot;context_id&quot;: 2101
+}</code></pre><h2>35.5 Mehrsprachigkeit</h2><p>Die vorhandene `language`-Information kann später zur Auswahl unterschiedlicher Hilfe-Dateien oder Sprachpfade erweitert werden.</p><hr><h1>36. Kurzreferenz</h1><h2>Modern</h2><pre><code>chmviewer.exe help.chm --topic PRINT</code></pre><pre><code>chmviewer.exe help.chm --topic PRINT --language basic</code></pre><pre><code>chmviewer.exe help.chm --context-id 2101 --topic PRINT</code></pre><pre><code>chmviewer.exe help.chm --local basic/print.html</code></pre><pre><code>chmviewer.exe help.chm --keyword PRINT</code></pre><h2>Rückwärtskompatibel</h2><pre><code>chmviewer.exe help.chm --word PRINT</code></pre><h2>Legacy</h2><pre><code>chmviewer.exe &quot;help.chm::/basic/print.html&quot;</code></pre><pre><code>chmviewer.exe -mapid 2101 help.chm</code></pre><pre><code>chmviewer.exe /context 2101 help.chm</code></pre><pre><code>chmviewer.exe -keyword PRINT help.chm</code></pre><h2>HTML Help Bridge</h2><pre><code>chmviewer.exe help.chm --hh-command HH_HELP_CONTEXT --hh-data 2101</code></pre><pre><code>chmviewer.exe help.chm --hh-command HH_DISPLAY_TOPIC --hh-data basic/print.html</code></pre><pre><code>chmviewer.exe help.chm --hh-command HH_KEYWORD_LOOKUP --hh-data PRINT</code></pre><hr><h1>Schlussbemerkung</h1><p>Der CHM Viewer verbindet klassische Windows-Hilfe-Strukturen mit einer modernen QtWebEngine-basierten Darstellung.</p><p>Der entscheidende Architekturpunkt ist die Trennung zwischen:</p><pre><code>externer Aufrufsyntax
+        │
+        ▼
+Normalisierung
+        │
+        ▼
+interne Hilfe-Anfrage
+        │
+        ▼
+gemeinsame Navigation</code></pre><p>Dadurch können moderne Anwendungen und ältere Delphi-/HTML-Help-orientierte Programme dieselbe Hilfedatenbasis verwenden, ohne dass zwei getrennte Viewer gepflegt werden müssen.</p>
+</main>
+</body>
+</html>
