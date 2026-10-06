@@ -24,11 +24,13 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 try:
     from PyQt5.QtCore import (
         QPointF,
+        QRect,
+        QEvent,
         QSettings,
         QSize,
         QTemporaryDir,
@@ -41,6 +43,7 @@ try:
         QColor,
         QDesktopServices,
         QFont,
+        QLinearGradient,
         QIcon,
         QKeySequence,
         QPainter,
@@ -51,6 +54,8 @@ try:
         QTextCursor,
     )
     from PyQt5.QtWidgets import (
+        QAbstractButton,
+        QAbstractSlider,
         QAction,
         QApplication,
         QDialog,
@@ -59,9 +64,11 @@ try:
         QLabel,
         QLineEdit,
         QMainWindow,
+        QMenuBar,
         QMessageBox,
         QPlainTextEdit,
         QPushButton,
+        QScrollBar,
         QSizePolicy,
         QSplitter,
         QStatusBar,
@@ -613,14 +620,458 @@ class ChmSourceDialog(QDialog):
         layout.addWidget(self.editor, 1)
 
 
+
+class ScrollBarArrowButton(QWidget):
+    """Kleiner, von Python gezeichneter Pfeil direkt auf einer QScrollBar."""
+
+    SIZE = 16
+    ARROW_COLOR = QColor("#ffd84a")
+
+    def __init__(self, scrollbar: QScrollBar, direction: str):
+        super().__init__(scrollbar)
+        self.scrollbar = scrollbar
+        self.direction = direction
+
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.ArrowCursor)
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setToolTip({
+            "up": "Eine Zeile nach oben",
+            "down": "Eine Zeile nach unten",
+            "left": "Nach links",
+            "right": "Nach rechts",
+        }.get(direction, ""))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # Passt optisch zu den bestehenden Scrollbars des Viewers.
+        if self.underMouse():
+            background = QColor("#2867aa")
+        else:
+            background = QColor("#1d4d87")
+
+        painter.fillRect(self.rect(), background)
+
+        border_pen = QPen(QColor("#4b79ad"), 1)
+        painter.setPen(border_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self.ARROW_COLOR)
+
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+        s = 4.0
+
+        path = QPainterPath()
+
+        if self.direction == "up":
+            path.moveTo(cx, cy - s)
+            path.lineTo(cx + s, cy + s)
+            path.lineTo(cx - s, cy + s)
+
+        elif self.direction == "down":
+            path.moveTo(cx - s, cy - s)
+            path.lineTo(cx + s, cy - s)
+            path.lineTo(cx, cy + s)
+
+        elif self.direction == "left":
+            path.moveTo(cx - s, cy)
+            path.lineTo(cx + s, cy - s)
+            path.lineTo(cx + s, cy + s)
+
+        else:  # right
+            path.moveTo(cx + s, cy)
+            path.lineTo(cx - s, cy - s)
+            path.lineTo(cx - s, cy + s)
+
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.end()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self.direction in ("up", "left"):
+                self.scrollbar.triggerAction(
+                    QAbstractSlider.SliderSingleStepSub
+                )
+            else:
+                self.scrollbar.triggerAction(
+                    QAbstractSlider.SliderSingleStepAdd
+                )
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
+
+class ScrollBarArrowController(QWidget):
+    """Positioniert Pfeile auf einer bereits vorhandenen Qt-Scrollbar."""
+
+    def __init__(self, scrollbar: QScrollBar):
+        super().__init__(scrollbar)
+        self.scrollbar = scrollbar
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        if scrollbar.orientation() == Qt.Vertical:
+            self.first = ScrollBarArrowButton(scrollbar, "up")
+            self.second = ScrollBarArrowButton(scrollbar, "down")
+        else:
+            self.first = ScrollBarArrowButton(scrollbar, "left")
+            self.second = ScrollBarArrowButton(scrollbar, "right")
+
+        # Die Buttons selbst müssen Mausereignisse empfangen können.
+        self.first.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.second.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+
+        scrollbar.installEventFilter(self)
+        self.reposition()
+
+    def reposition(self):
+        sb = self.scrollbar
+        size = ScrollBarArrowButton.SIZE
+
+        if sb.orientation() == Qt.Vertical:
+            self.first.setGeometry(
+                0,
+                0,
+                sb.width(),
+                size,
+            )
+            self.second.setGeometry(
+                0,
+                max(0, sb.height() - size),
+                sb.width(),
+                size,
+            )
+        else:
+            self.first.setGeometry(
+                0,
+                0,
+                size,
+                sb.height(),
+            )
+            self.second.setGeometry(
+                max(0, sb.width() - size),
+                0,
+                size,
+                sb.height(),
+            )
+
+        self.first.raise_()
+        self.second.raise_()
+
+    def eventFilter(self, watched, event):
+        if watched is self.scrollbar and event.type() in (
+            QEvent.Resize,
+            QEvent.Show,
+            QEvent.LayoutRequest,
+        ):
+            QTimer.singleShot(0, self.reposition)
+
+        return False
+
+
+class TitleBarButton(QAbstractButton):
+    """Programmseitig gezeichneter Button der eigenen Titelleiste."""
+
+    def __init__(self, kind: str, title_bar):
+        super().__init__(title_bar)
+        self.kind = kind
+        self.title_bar = title_bar
+        self.setFixedSize(46, 30)
+        self.setCursor(Qt.ArrowCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setMouseTracking(True)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        dark = self.title_bar.is_dark_mode()
+        hovered = self.underMouse()
+        pressed = self.isDown()
+
+        if self.kind == "close" and hovered:
+            bg = QColor("#c42b1c" if not pressed else "#a62216")
+        elif hovered:
+            bg = QColor(255, 255, 255, 34) if dark else QColor(0, 0, 0, 28)
+        elif pressed:
+            bg = QColor(255, 255, 255, 22) if dark else QColor(0, 0, 0, 20)
+        else:
+            bg = Qt.transparent
+
+        if bg != Qt.transparent:
+            painter.fillRect(self.rect(), bg)
+
+        color = QColor("#ffffff") if dark else QColor("#111111")
+        if self.kind == "close" and hovered:
+            color = QColor("#ffffff")
+
+        pen = QPen(color, 1.6)
+        pen.setCapStyle(Qt.SquareCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+
+        if self.kind == "minimize":
+            painter.drawLine(int(cx - 6), int(cy + 4), int(cx + 6), int(cy + 4))
+
+        elif self.kind == "restore":
+            # Im maximierten Zustand: klassisches Wiederherstellen-Symbol.
+            if self.window().isMaximized():
+                painter.drawRect(int(cx - 4), int(cy - 6), 9, 8)
+                painter.drawRect(int(cx - 7), int(cy - 3), 9, 8)
+            else:
+                # Im Normalzustand dient derselbe Button als Maximieren.
+                painter.drawRect(int(cx - 6), int(cy - 6), 12, 11)
+
+        elif self.kind == "close":
+            painter.drawLine(int(cx - 5), int(cy - 5), int(cx + 5), int(cy + 5))
+            painter.drawLine(int(cx + 5), int(cy - 5), int(cx - 5), int(cy + 5))
+
+        painter.end()
+
+
+class CustomTitleBar(QWidget):
+    """Eigene Titelleiste: Gradient, Ziehen, Doppelklick und Fensterbuttons."""
+
+    HEIGHT = 32
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+        self._dragging = False
+        self._drag_offset = None
+
+        self.setFixedHeight(self.HEIGHT)
+        self.setMouseTracking(True)
+        self.setObjectName("chm_custom_titlebar")
+
+        self.minimize_button = TitleBarButton("minimize", self)
+        self.restore_button = TitleBarButton("restore", self)
+        self.close_button = TitleBarButton("close", self)
+
+        self.minimize_button.setToolTip("Minimieren")
+        self.restore_button.setToolTip("Maximieren / Wiederherstellen")
+        self.close_button.setToolTip("Schließen")
+
+        self.minimize_button.clicked.connect(self._window.showMinimized)
+        self.restore_button.clicked.connect(self.toggle_max_restore)
+        self.close_button.clicked.connect(self._window.close)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 1, 0, 1)
+        layout.setSpacing(0)
+        layout.addStretch(1)
+        layout.addWidget(self.minimize_button)
+        layout.addWidget(self.restore_button)
+        layout.addWidget(self.close_button)
+
+    def is_dark_mode(self) -> bool:
+        return bool(getattr(self._window, "dark_mode_enabled", True))
+
+    def toggle_max_restore(self):
+        if self._window.isMaximized():
+            self._window.showNormal()
+        else:
+            self._window.showMaximized()
+        self.update_state()
+
+    def update_state(self):
+        self.restore_button.update()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        gradient = QLinearGradient(0, 0, self.width(), 0)
+        if self.is_dark_mode():
+            # Gewünschter Dark-Mode-Verlauf: Schwarz -> Grau.
+            gradient.setColorAt(0.0, QColor("#050505"))
+            gradient.setColorAt(0.48, QColor("#202020"))
+            gradient.setColorAt(1.0, QColor("#555555"))
+            text_color = QColor("#ffffff")
+        else:
+            gradient.setColorAt(0.0, QColor("#f5f5f5"))
+            gradient.setColorAt(1.0, QColor("#a8a8a8"))
+            text_color = QColor("#111111")
+
+        painter.fillRect(self.rect(), gradient)
+
+        painter.setPen(text_color)
+        font = QFont(self.font())
+        font.setBold(True)
+        painter.setFont(font)
+
+        right_limit = self.width() - (
+            self.minimize_button.width()
+            + self.restore_button.width()
+            + self.close_button.width()
+            + 12
+        )
+        text_rect = QRect(12, 0, max(0, right_limit - 12), self.height())
+        painter.drawText(
+            text_rect,
+            Qt.AlignVCenter | Qt.AlignLeft,
+            self._window.windowTitle(),
+        )
+        painter.end()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and not self._window.isMaximized():
+            self._dragging = True
+            self._drag_offset = event.globalPos() - self._window.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._dragging
+            and self._drag_offset is not None
+            and (event.buttons() & Qt.LeftButton)
+            and not self._window.isMaximized()
+        ):
+            self._window.move(event.globalPos() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+            self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.toggle_max_restore()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class WindowResizeHandle(QWidget):
+    """Transparenter Griff zum Skalieren eines frameless Fensters."""
+
+    def __init__(self, owner, edges: str):
+        super().__init__(owner)
+        self.owner = owner
+        self.edges = edges
+        self._press_global = None
+        self._start_geometry = None
+
+        cursor = Qt.ArrowCursor
+        if edges in ("left", "right"):
+            cursor = Qt.SizeHorCursor
+        elif edges in ("top", "bottom"):
+            cursor = Qt.SizeVerCursor
+        elif edges in ("top-left", "bottom-right"):
+            cursor = Qt.SizeFDiagCursor
+        elif edges in ("top-right", "bottom-left"):
+            cursor = Qt.SizeBDiagCursor
+
+        self.setCursor(cursor)
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WA_StyledBackground, False)
+        self.setStyleSheet("background: transparent;")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and not self.owner.isMaximized():
+            self._press_global = event.globalPos()
+            self._start_geometry = QRect(self.owner.geometry())
+            self.grabMouse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._press_global is None
+            or self._start_geometry is None
+            or not (event.buttons() & Qt.LeftButton)
+            or self.owner.isMaximized()
+        ):
+            super().mouseMoveEvent(event)
+            return
+
+        delta = event.globalPos() - self._press_global
+        rect = QRect(self._start_geometry)
+
+        min_w = self.owner.minimumWidth()
+        min_h = self.owner.minimumHeight()
+
+        if "left" in self.edges:
+            new_left = min(
+                rect.left() + delta.x(),
+                rect.right() - min_w + 1,
+            )
+            rect.setLeft(new_left)
+
+        if "right" in self.edges:
+            new_right = max(
+                rect.right() + delta.x(),
+                rect.left() + min_w - 1,
+            )
+            rect.setRight(new_right)
+
+        if "top" in self.edges:
+            new_top = min(
+                rect.top() + delta.y(),
+                rect.bottom() - min_h + 1,
+            )
+            rect.setTop(new_top)
+
+        if "bottom" in self.edges:
+            new_bottom = max(
+                rect.bottom() + delta.y(),
+                rect.top() + min_h - 1,
+            )
+            rect.setBottom(new_bottom)
+
+        self.owner.setGeometry(rect)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._press_global is not None:
+            try:
+                self.releaseMouse()
+            except Exception:
+                pass
+        self._press_global = None
+        self._start_geometry = None
+        super().mouseReleaseEvent(event)
+
+
+
 class MainWindow(QMainWindow):
     CONTENT_THEME_STYLE_ID = "d64-chm-content-theme"
+    WINDOW_BORDER_WIDTH = 3
+    RESIZE_HANDLE_SIZE = 7
 
     remote_asset_ready = pyqtSignal(str, str)
     remote_asset_failed = pyqtSignal(str, str)
 
     def __init__(self, parent=None, dark_mode: Optional[bool] = None):
         super().__init__(parent)
+
+        # Eigene Titelleiste / eigener 3-px-Rahmen.
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setContentsMargins(
+            self.WINDOW_BORDER_WIDTH,
+            self.WINDOW_BORDER_WIDTH,
+            self.WINDOW_BORDER_WIDTH,
+            self.WINDOW_BORDER_WIDTH,
+        )
 
         # Einstellungen stehen bereits vor dem Aufbau der sichtbaren Widgets
         # zur Verfügung. Dadurch können Theme, Fenstergeometrie und Splitter
@@ -661,12 +1112,16 @@ class MainWindow(QMainWindow):
 
         self.create_actions()
         self.create_menu()
+        self.create_custom_titlebar()
         self.create_toolbar()
         self.create_content()
         self.create_statusbar()
         self.connect_signals()
+        self.install_native_scrollbar_arrows()
+        self.create_resize_handles()
         self.apply_widget_theme()
         self.restore_ui_state()
+        self._layout_resize_handles()
         self.update_navigation()
 
     # ---- UI ---------------------------------------------------------------
@@ -692,21 +1147,125 @@ class MainWindow(QMainWindow):
         self.forward_action = QAction(style.standardIcon(QStyle.SP_ArrowForward), "Vor", self)
 
     def create_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("Datei")
+        # Eigene QMenuBar, damit sie unter der selbst gezeichneten Titelleiste
+        # in einem gemeinsamen QMainWindow-Menü-Widget sitzen kann.
+        self.main_menu_bar = QMenuBar(self)
+        self.main_menu_bar.setObjectName("chm_main_menu_bar")
+
+        file_menu = self.main_menu_bar.addMenu("Datei")
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.open_directory_action)
         file_menu.addSeparator()
         file_menu.addAction(self.quit_action)
 
-        edit_menu = self.menuBar().addMenu("Bearbeiten")
+        edit_menu = self.main_menu_bar.addMenu("Bearbeiten")
         edit_menu.addAction(self.copy_action)
         edit_menu.addAction(self.source_action)
 
-        view_menu = self.menuBar().addMenu("Ansicht")
+        view_menu = self.main_menu_bar.addMenu("Ansicht")
         view_menu.addAction(self.dark_action)
 
-        help_menu = self.menuBar().addMenu("Hilfe")
+        help_menu = self.main_menu_bar.addMenu("Hilfe")
         help_menu.addAction(self.about_action)
+
+    def create_custom_titlebar(self) -> None:
+        self.title_bar = CustomTitleBar(self)
+
+        header = QWidget(self)
+        header.setObjectName("chm_header_widget")
+
+        layout = QVBoxLayout(header)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.title_bar)
+        layout.addWidget(self.main_menu_bar)
+
+        self.setMenuWidget(header)
+        self.windowTitleChanged.connect(lambda _title: self.title_bar.update())
+
+    def install_native_scrollbar_arrows(self) -> None:
+        """Gelbe Pfeile ausschließlich in den bestehenden TOC-Scrollbars.
+
+        Keine zusätzlichen Pfeile werden in das HTML-Dokument eingeblendet.
+        """
+        self._toc_scrollbar_arrow_controllers = []
+
+        # Gewünscht ist ausdrücklich der TOC / Table of Contents links.
+        toc_tree = self.topics_tab.tree
+
+        for scrollbar in (
+            toc_tree.verticalScrollBar(),
+            toc_tree.horizontalScrollBar(),
+        ):
+            controller = ScrollBarArrowController(scrollbar)
+            self._toc_scrollbar_arrow_controllers.append(controller)
+
+            # Nach Layout-/Style-Berechnung nochmals exakt positionieren.
+            QTimer.singleShot(0, controller.reposition)
+
+
+    def create_resize_handles(self) -> None:
+        self._resize_handles = {
+            "left": WindowResizeHandle(self, "left"),
+            "right": WindowResizeHandle(self, "right"),
+            "top": WindowResizeHandle(self, "top"),
+            "bottom": WindowResizeHandle(self, "bottom"),
+            "top-left": WindowResizeHandle(self, "top-left"),
+            "top-right": WindowResizeHandle(self, "top-right"),
+            "bottom-left": WindowResizeHandle(self, "bottom-left"),
+            "bottom-right": WindowResizeHandle(self, "bottom-right"),
+        }
+        self._layout_resize_handles()
+
+    def _layout_resize_handles(self) -> None:
+        handles = getattr(self, "_resize_handles", None)
+        if not handles:
+            return
+
+        if self.isMaximized() or self.isFullScreen():
+            for handle in handles.values():
+                handle.hide()
+            return
+
+        for handle in handles.values():
+            handle.show()
+
+        w = self.width()
+        h = self.height()
+        s = self.RESIZE_HANDLE_SIZE
+
+        handles["top-left"].setGeometry(0, 0, s, s)
+        handles["top-right"].setGeometry(max(0, w - s), 0, s, s)
+        handles["bottom-left"].setGeometry(0, max(0, h - s), s, s)
+        handles["bottom-right"].setGeometry(
+            max(0, w - s),
+            max(0, h - s),
+            s,
+            s,
+        )
+
+        handles["top"].setGeometry(s, 0, max(0, w - 2 * s), s)
+        handles["bottom"].setGeometry(
+            s,
+            max(0, h - s),
+            max(0, w - 2 * s),
+            s,
+        )
+        handles["left"].setGeometry(0, s, s, max(0, h - 2 * s))
+        handles["right"].setGeometry(
+            max(0, w - s),
+            s,
+            s,
+            max(0, h - 2 * s),
+        )
+
+        for handle in handles.values():
+            handle.raise_()
+
+    def window_border_color(self) -> QColor:
+        if self.dark_mode_enabled:
+            return QColor("#707070")
+        return QColor("#707070")
 
     def create_toolbar(self) -> None:
         self.navigation_toolbar = QToolBar("Navigation", self)
@@ -889,6 +1448,12 @@ QMenuBar, QMenu, QToolBar, QStatusBar {
     background-color: #25282d;
     color: #f1f3f4;
 }
+QWidget#chm_header_widget {
+    background: transparent;
+}
+QWidget#chm_custom_titlebar {
+    background: transparent;
+}
 QMenuBar::item:selected, QMenu::item:selected {
     background-color: #365f7d;
 }
@@ -1038,49 +1603,111 @@ QScrollBar::sub-page:horizontal {
     def content_foreground_color(self) -> QColor:
         return QColor("#ffffff" if self.dark_mode_enabled else "#000000")
 
+    def scrollbar_arrow_data_uri(self, direction: str, color: str = "#ffd84a") -> str:
+        """Erzeugt die Scrollbar-Pfeilgrafik vollständig in Python.
+
+        Die zurückgegebene SVG wird als Data-URI in das von Python injizierte
+        QWebEngine-CSS eingesetzt. Die CHM-/HTML-Datei selbst braucht damit
+        keinerlei Scrollbar-Pfeildefinitionen.
+        """
+        paths = {
+            "up": "M 8 3 L 14 11 H 2 Z",
+            "down": "M 2 5 H 14 L 8 13 Z",
+            "left": "M 3 8 L 11 2 V 14 Z",
+            "right": "M 13 8 L 5 2 V 14 Z",
+        }
+
+        path = paths.get(str(direction).casefold())
+        if path is None:
+            raise ValueError(f"Unbekannte Scrollbar-Pfeilrichtung: {direction}")
+
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" '
+            'width="16" height="16" viewBox="0 0 16 16">'
+            f'<path fill="{color}" d="{path}"/>'
+            '</svg>'
+        )
+        return "data:image/svg+xml," + quote(svg, safe="")
+
     def content_theme_css(self) -> str:
+        # Die Pfeile werden ausschließlich hier in Python erzeugt.
+        # HelpNDoc-/CHM-Seiten müssen keine Pfeilgrafiken definieren.
+        arrow_color = "#ffd84a"
+        arrow_up = self.scrollbar_arrow_data_uri("up", arrow_color)
+        arrow_down = self.scrollbar_arrow_data_uri("down", arrow_color)
+        arrow_left = self.scrollbar_arrow_data_uri("left", arrow_color)
+        arrow_right = self.scrollbar_arrow_data_uri("right", arrow_color)
+
         if self.dark_mode_enabled:
             background, foreground = "#000000", "#ffffff"
             link, visited, active = "#66b3ff", "#c792ea", "#ffcc66"
             scheme = "dark"
-
-            # Exakt dieselben Maße/Farben wie die native Qt-Scrollbar links.
-            scrollbar_css = """
-::-webkit-scrollbar {
-    width: 16px;
-    height: 16px;
-    background: #163b73;
-}
-::-webkit-scrollbar-track {
-    background: #163b73;
-    border: 1px solid #4b79ad;
-}
-::-webkit-scrollbar-thumb {
-    background: #245a9a;
-    border: 1px solid #4b79ad;
-    border-radius: 3px;
-    min-height: 24px;
-    min-width: 24px;
-}
-::-webkit-scrollbar-thumb:hover {
-    background: #3375bd;
-}
-::-webkit-scrollbar-button:single-button {
-    width: 16px;
-    height: 16px;
-    display: block;
-    background-color: #1d4d87;
-    border: 1px solid #4b79ad;
-}
-::-webkit-scrollbar-corner {
-    background: #163b73;
-}
-"""
+            scroll_track = "#163b73"
+            scroll_thumb = "#245a9a"
+            scroll_thumb_hover = "#3375bd"
+            scroll_button = "#1d4d87"
+            scroll_button_hover = "#2867aa"
+            scroll_border = "#4b79ad"
         else:
             background, foreground = "#ffffff", "#000000"
             link, visited, active = "#0000ee", "#551a8b", "#ee0000"
             scheme = "light"
-            scrollbar_css = ""
+            scroll_track = "#e7e7e7"
+            scroll_thumb = "#b7b7b7"
+            scroll_thumb_hover = "#969696"
+            scroll_button = "#4a4a4a"
+            scroll_button_hover = "#606060"
+            scroll_border = "#777777"
+
+        scrollbar_css = f"""
+::-webkit-scrollbar {{
+    width: 16px !important;
+    height: 16px !important;
+    background: {scroll_track} !important;
+}}
+::-webkit-scrollbar-track {{
+    background: {scroll_track} !important;
+    border: 1px solid {scroll_border} !important;
+}}
+::-webkit-scrollbar-thumb {{
+    background: {scroll_thumb} !important;
+    border: 1px solid {scroll_border} !important;
+    border-radius: 3px !important;
+    min-height: 24px;
+    min-width: 24px;
+}}
+::-webkit-scrollbar-thumb:hover {{
+    background: {scroll_thumb_hover} !important;
+}}
+::-webkit-scrollbar-button:single-button {{
+    width: 16px !important;
+    height: 16px !important;
+    display: block !important;
+    background-color: {scroll_button} !important;
+    background-repeat: no-repeat !important;
+    background-position: center !important;
+    background-size: 12px 12px !important;
+    border: 1px solid {scroll_border} !important;
+}}
+::-webkit-scrollbar-button:single-button:hover {{
+    background-color: {scroll_button_hover} !important;
+}}
+::-webkit-scrollbar-button:single-button:vertical:decrement {{
+    background-image: url("{arrow_up}") !important;
+}}
+::-webkit-scrollbar-button:single-button:vertical:increment {{
+    background-image: url("{arrow_down}") !important;
+}}
+::-webkit-scrollbar-button:single-button:horizontal:decrement {{
+    background-image: url("{arrow_left}") !important;
+}}
+::-webkit-scrollbar-button:single-button:horizontal:increment {{
+    background-image: url("{arrow_right}") !important;
+}}
+::-webkit-scrollbar-corner {{
+    background: {scroll_track} !important;
+}}
+"""
 
         return (
             f":root {{ color-scheme: {scheme}; }}\n"
@@ -1128,11 +1755,29 @@ QScrollBar::sub-page:horizontal {
         )
         self.web_page.runJavaScript(script)
 
+
     def set_dark_mode(self, enabled: bool) -> None:
         self.dark_mode_enabled = bool(enabled)
         self.settings.setValue("ui/dark_mode", self.dark_mode_enabled)
         self.apply_application_theme()
         self.apply_content_theme()
+
+        if hasattr(self, "title_bar"):
+            self.title_bar.update_state()
+
+        for controller in getattr(
+            self,
+            "_toc_scrollbar_arrow_controllers",
+            [],
+        ):
+            try:
+                controller.first.update()
+                controller.second.update()
+                controller.reposition()
+            except Exception:
+                pass
+
+        self.update()
 
     # ---- Persistente Fenster-/Splitter-Geometrie -------------------------
     def restore_ui_state(self) -> None:
@@ -1935,7 +2580,8 @@ QScrollBar::sub-page:horizontal {
 
     def load_finished(self, success: bool) -> None:
         self.apply_content_theme()
-        self.status_bar.showMessage(
+        if success:
+            self.status_bar.showMessage(
             "Seite geladen" if success else "Die Seite konnte nicht geladen werden",
             2500 if success else 5000,
         )
@@ -1948,6 +2594,8 @@ QScrollBar::sub-page:horizontal {
         if self.chm_path is not None:
             visible_title = title.strip() or self.chm_path.name
             self.setWindowTitle(f"{visible_title} – CHM Viewer")
+        if hasattr(self, "title_bar"):
+            self.title_bar.update()
 
     def update_navigation(self) -> None:
         history = self.web_view.history()
@@ -1959,6 +2607,39 @@ QScrollBar::sub-page:horizontal {
         self.source_action.setEnabled(has_content)
         self.add_favorite_button.setEnabled(has_content)
         self.remove_favorite_button.setEnabled(self.favorites_tab.tree.currentItem() is not None)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+
+        # Exakt 3 Pixel sichtbarer Rahmen.
+        painter = QPainter(self)
+        pen = QPen(
+            self.window_border_color(),
+            self.WINDOW_BORDER_WIDTH,
+        )
+        pen.setJoinStyle(Qt.MiterJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        inset = self.WINDOW_BORDER_WIDTH / 2.0
+        painter.drawRect(
+            int(inset),
+            int(inset),
+            max(0, int(self.width() - self.WINDOW_BORDER_WIDTH)),
+            max(0, int(self.height() - self.WINDOW_BORDER_WIDTH)),
+        )
+        painter.end()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._layout_resize_handles()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            if hasattr(self, "title_bar"):
+                self.title_bar.update_state()
+            self._layout_resize_handles()
 
     def closeEvent(self, event) -> None:
         # Vor jeglichem Aufräumen den sichtbaren Benutzerzustand sichern.
