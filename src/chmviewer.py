@@ -1092,7 +1092,7 @@ class MainWindow(QMainWindow):
 
         self.setObjectName("chm_viewer_mainwindow")
         self.setWindowTitle("CHM Viewer")
-        self.resize(1180, 760)
+        self.resize(1000, 700)
         self.setMinimumSize(800, 500)
 
         self.temporary: Optional[tempfile.TemporaryDirectory] = None
@@ -1101,8 +1101,16 @@ class MainWindow(QMainWindow):
         self.home_local = ""
         self.source_dialogs: List[ChmSourceDialog] = []
         self.source_temp_files: List[Path] = []
-        self.remote_asset_cache = QTemporaryDir("chmviewer_remote_assets_XXXXXX")
+        # Remote-Assets ausschließlich im System-TEMP-Verzeichnis halten.
+        # Zusätzlich wird der Cache beim Beenden explizit gelöscht.
+        remote_asset_template = str(
+            Path(tempfile.gettempdir()) / "chmviewer_remote_assets_XXXXXX"
+        )
+        self.remote_asset_cache = QTemporaryDir(remote_asset_template)
+        self.remote_asset_cache.setAutoRemove(True)
+
         self.remote_asset_inflight = set()
+        self._closing = False
         self.context_id_map: Dict[int, str] = {}
         self.pending_context_language = ""
         self.pending_context_word = ""
@@ -1812,6 +1820,60 @@ QScrollBar::sub-page:horizontal {
         self.settings.sync()
 
 
+    def cleanup_remote_asset_cache(self) -> None:
+        """Entfernt den kompletten Remote-Asset-Cache zuverlässig.
+
+        QTemporaryDir besitzt zwar AutoRemove, der Cache wird hier trotzdem
+        explizit gelöscht, damit auch bei normalem QApplication-Shutdown keine
+        chmviewer_remote_assets_* Verzeichnisse zurückbleiben.
+        """
+        self._closing = True
+        self.remote_asset_inflight.clear()
+
+        cache = getattr(self, "remote_asset_cache", None)
+        if cache is None:
+            return
+
+        cache_path = ""
+        try:
+            cache_path = str(cache.path() or "")
+        except Exception:
+            cache_path = ""
+
+        try:
+            cache.setAutoRemove(True)
+        except Exception:
+            pass
+
+        # Zuerst Qt selbst entfernen lassen.
+        removed = False
+        try:
+            removed = bool(cache.remove())
+        except Exception:
+            removed = False
+
+        # Fallback für Windows: falls Qt das Verzeichnis wegen eines noch
+        # offenen Handles nicht vollständig entfernen konnte.
+        if cache_path:
+            path = Path(cache_path)
+            if path.exists():
+                try:
+                    shutil.rmtree(path)
+                    removed = True
+                except OSError as exc:
+                    print(
+                        f"[CHM CLEANUP] Remote-Asset-Verzeichnis konnte "
+                        f"nicht gelöscht werden: {path} :: {exc}",
+                        flush=True,
+                    )
+
+        if cache_path and not Path(cache_path).exists():
+            print(
+                f"[CHM CLEANUP] Remote-Asset-Verzeichnis gelöscht: "
+                f"{cache_path}",
+                flush=True,
+            )
+
     # ---- Remote-URL-/SVG-Unterstützung -----------------------------------
     def certificate_trusted_hosts(self) -> List[str]:
         raw = self.settings.value("network/trusted_certificate_hosts", [])
@@ -1870,6 +1932,10 @@ QScrollBar::sub-page:horizontal {
             ).start()
 
     def _download_remote_asset_worker(self, url: str) -> None:
+        if getattr(self, "_closing", False):
+            self.remote_asset_inflight.discard(url)
+            return
+
         try:
             request = urllib.request.Request(
                 url,
@@ -1923,7 +1989,16 @@ QScrollBar::sub-page:horizontal {
                     f"Content-Type: {content_type or '(fehlt)'}"
                 )
 
+            # Während des Programm-Shutdowns keine Cache-Datei mehr erzeugen.
+            if getattr(self, "_closing", False):
+                self.remote_asset_inflight.discard(url)
+                return
+
             cache_dir = Path(self.remote_asset_cache.path())
+            if not cache_dir.is_dir():
+                self.remote_asset_inflight.discard(url)
+                return
+
             digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
             target = cache_dir / f"{digest}{suffix}"
             target.write_bytes(data)
@@ -2029,7 +2104,7 @@ QScrollBar::sub-page:horizontal {
         project = find_chm_file_by_suffix(root, ".hhp")
         source = project if project is not None else root / "index.html"
         self._adopt_content(root, source, topics, keywords, home_local, context_id_map, None)
-        self.setWindowTitle(f"{display_name} – CHM Viewer")
+        self.setWindowTitle(f"{display_name} – CHM Viewer (c) 2026 Jens Kallup")
         return True
 
     def _adopt_content(
@@ -2645,14 +2720,24 @@ QScrollBar::sub-page:horizontal {
         # Vor jeglichem Aufräumen den sichtbaren Benutzerzustand sichern.
         self.save_ui_state()
 
+        # Ab jetzt dürfen Hintergrund-Downloads keine neuen Cache-Dateien
+        # mehr anlegen.
+        self._closing = True
+
+        # QWebEngine zuerst von eventuell lokal gespiegelten Remote-Dateien
+        # lösen, damit Windows keine offenen Handles auf dem Cache behält.
         self.web_view.setUrl(QUrl("about:blank"))
         QApplication.processEvents()
+
+        self.cleanup_remote_asset_cache()
+
         if self.temporary is not None:
             try:
                 self.temporary.cleanup()
             except OSError:
                 pass
             self.temporary = None
+
         super().closeEvent(event)
 
 
@@ -2906,6 +2991,10 @@ def main(argv=None) -> int:
     app.setOrganizationName(APP_ORG)
 
     window = MainWindow(dark_mode=args.dark_mode)
+
+    # Zweite Cleanup-Sicherung: auch ein QApplication-Shutdown, der nicht
+    # direkt über MainWindow.closeEvent() läuft, entfernt Remote-Assets.
+    app.aboutToQuit.connect(window.cleanup_remote_asset_cache)
 
     if (
         args.topic
